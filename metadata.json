@@ -1,0 +1,8 @@
+{
+  "name": "AirTax Praha - Evidence ubytovaných a poplatky z pobytu",
+  "description": "Chytrá aplikace pro evidenci ubytovaných cizinců, generování a import UNL souborů pro systém UbyPort 2.0 cizinecké policie s dynamickým Gemini OCR skenerem.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
