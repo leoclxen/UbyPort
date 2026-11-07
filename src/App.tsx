@@ -836,54 +836,134 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  // Helper for rotating photo by 90 degrees in browser
+  const rotateImageBase64 = (base64: string, degrees: number = 90): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(base64);
+          return;
+        }
+        if (degrees === 90 || degrees === 270) {
+          canvas.width = img.height;
+          canvas.height = img.width;
+        } else {
+          canvas.width = img.width;
+          canvas.height = img.height;
+        }
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((degrees * Math.PI) / 180);
+        ctx.drawImage(img, -img.width / 2, -img.height / 2);
+        resolve(canvas.toDataURL('image/jpeg', 0.95));
+      };
+      img.onerror = () => resolve(base64);
+      img.src = base64;
+    });
+  };
+
+  const handleRotateImage = async () => {
+    if (!imagePreview) return;
+    try {
+      const rotated = await rotateImageBase64(imagePreview, 90);
+      setImagePreview(rotated);
+      showToast('Obrázek otočen o 90°', 'info');
+    } catch (e) {
+      console.warn('Chyba při otáčení obrázku', e);
+    }
+  };
+
   const processImageWithOcr = async (base64Data: string, mimeType: string = 'image/jpeg') => {
+    const hasClientKey = Boolean(userApiKey && userApiKey.trim().length > 0);
+    const isStaticHost = typeof window !== 'undefined' && (
+      window.location.hostname.includes('github.io') ||
+      window.location.protocol === 'file:' ||
+      (window.location.hostname !== 'localhost' && !window.location.port)
+    );
+
+    // Na GitHub Pages (statický hosting) bez zadaného API klíče ihned otevřeme zadání klíče
+    if (!hasClientKey && isStaticHost) {
+      setIsMissingKeyModalOpen(true);
+      showToast('Na GitHub Pages zadejte svůj Gemini API klíč v okně níže.', 'info');
+      return;
+    }
+
     setIsScanning(true);
     setScanStatus(`Čtení ubytovacího lístku modelem ${activeModelName}...`);
 
     try {
       let resultData: any = null;
+      let lastClientError: any = null;
 
       // 1. Zkusíme přímé klientské volání přes Google GenAI SDK
-      if (userApiKey && userApiKey.trim().length > 0) {
+      if (hasClientKey) {
         try {
           const clientRes = await runClientGeminiOcr(
             base64Data,
-            userApiKey,
+            userApiKey.trim(),
             activeModelName,
             mimeType
           );
           resultData = clientRes.data;
           setScanStatus(`Úspěšně zpracováno modelem ${clientRes.modelUsed}!`);
         } catch (clientErr: any) {
-          console.warn('Klientské volání OCR selhalo, zkouším serverové API:', clientErr);
+          console.warn('Klientské volání OCR selhalo:', clientErr);
+          lastClientError = clientErr;
         }
       }
 
-      // 2. Fallback na serverové proxy API
-      if (!resultData) {
-        const response = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: base64Data,
-            mimeType,
-            userApiKey: userApiKey || undefined,
-            preferredModel: activeModelName
-          })
-        });
+      // 2. Fallback na serverové proxy API (pouze pokud nejsme na čistě statickém hostingu jako GitHub Pages)
+      if (!resultData && !isStaticHost) {
+        try {
+          const response = await fetch('/api/ocr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageBase64: base64Data,
+              mimeType,
+              userApiKey: userApiKey || undefined,
+              preferredModel: activeModelName
+            })
+          });
 
-        if (!response.ok) {
-          const errRes = await response.json();
-          if (response.status === 401 || errRes.error?.includes('API klíč')) {
-            setIsMissingKeyModalOpen(true);
-            throw new Error(errRes.error || 'Není zadán Gemini API klíč.');
+          const contentType = response.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await response.json();
+            if (!response.ok) {
+              if (response.status === 401 || data.error?.includes('API klíč')) {
+                setIsMissingKeyModalOpen(true);
+                throw new Error(data.error || 'Není zadán Gemini API klíč.');
+              }
+              throw new Error(data.error || `Chyba OCR serveru (${response.status})`);
+            }
+            resultData = data.data;
+            setScanStatus(`Zpracováno modelem ${data.modelUsed || activeModelName}!`);
+          } else {
+            // Server vrátil ne-JSON (např. 404 HTML)
+            if (response.status === 404) {
+              throw new Error('Serverové OCR API není na této doméně dostupné. Zadejte prosím Gemini API klíč v Nastavení pro přímé čtení v prohlížeči.');
+            }
+            const errText = await response.text();
+            throw new Error(`Chyba serveru (${response.status}): ${errText.slice(0, 80)}`);
           }
-          throw new Error(errRes.error || `Chyba OCR serveru (${response.status})`);
+        } catch (serverErr: any) {
+          if (lastClientError) {
+            throw lastClientError;
+          }
+          throw serverErr;
         }
+      } else if (!resultData && lastClientError) {
+        throw lastClientError;
+      }
 
-        const data = await response.json();
-        resultData = data.data;
-        setScanStatus(`Zpracováno modelem ${data.modelUsed || activeModelName}!`);
+      if (!resultData) {
+        if (!hasClientKey) {
+          setIsMissingKeyModalOpen(true);
+          throw new Error('Na tomto hostingu je pro OCR skenování vyžadován Gemini API klíč. Zadejte jej prosím v nastavení.');
+        }
+        throw new Error('Nepodařilo se zpracovat obrázek ubytovacího lístku.');
       }
 
       if (resultData && Array.isArray(resultData.guests) && resultData.guests.length > 0) {
@@ -1383,23 +1463,52 @@ export default function App() {
               )}
 
               {imagePreview && !isScanning ? (
-                <div className="space-y-3 w-full max-w-sm">
-                  <div className="relative rounded-2xl overflow-hidden border border-slate-700 max-h-56">
-                    <img src={imagePreview} alt="Náhled lístku" className="w-full object-cover" />
+                <div className="space-y-3 w-full max-w-md">
+                  <div className="relative rounded-2xl overflow-hidden border border-slate-700 bg-slate-950/90 p-2 min-h-[200px] max-h-[380px] flex items-center justify-center">
+                    <img
+                      src={imagePreview}
+                      alt="Náhled ubytovacího lístku"
+                      className="max-h-[360px] max-w-full w-auto h-auto object-contain rounded-xl shadow-lg"
+                    />
+                    <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10">
+                      <button
+                        type="button"
+                        onClick={handleRotateImage}
+                        title="Otočit obrázek o 90°"
+                        className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-white tap-active border border-slate-700/80 shadow-md flex items-center gap-1"
+                      >
+                        <RotateCcw className="w-4 h-4 text-blue-400" />
+                        <span className="text-[10px] font-semibold pr-1">Otočit</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImagePreview(null)}
+                        title="Zavřít náhled"
+                        className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white tap-active border border-slate-700/80 shadow-md"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
                     <button
-                      onClick={() => setImagePreview(null)}
-                      className="absolute top-2 right-2 p-1.5 rounded-full bg-slate-900/80 text-white tap-active"
+                      type="button"
+                      onClick={handleRotateImage}
+                      className="py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active flex items-center justify-center gap-1.5"
                     >
-                      <X className="w-4 h-4" />
+                      <RotateCcw className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Otočit o 90°</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => processImageWithOcr(imagePreview)}
+                      className="py-2.5 px-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/30"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Spustit skenování</span>
                     </button>
                   </div>
-                  <button
-                    onClick={() => processImageWithOcr(imagePreview)}
-                    className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-2"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Znovu rozpoznat přes Gemini</span>
-                  </button>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -2761,20 +2870,61 @@ export default function App() {
               <KeyRound className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="font-bold text-white text-base">Chybí Gemini API klíč</h3>
+              <h3 className="font-bold text-white text-base">Zadejte Gemini API klíč</h3>
               <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                Pro automatické čtení ubytovacích lístků zadejte svůj Gemini API klíč v nastavení.
+                Na statickém hostingu GitHub Pages probíhá rozpoznávání lístků přímo ve vašem prohlížeči pomocí Google Gemini API. Zadejte svůj bezplatný klíč:
               </p>
             </div>
-            <button
-              onClick={() => {
-                setIsMissingKeyModalOpen(false);
-                setIsSettingsModalOpen(true);
-              }}
-              className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
-            >
-              Otevřít Nastavení a zadat klíč
-            </button>
+
+            <div className="space-y-1.5 text-left">
+              <label className="text-[11px] text-slate-300 font-semibold block">Váš Google Gemini API klíč:</label>
+              <input
+                type="password"
+                value={userApiKey}
+                onChange={e => setUserApiKey(e.target.value)}
+                placeholder="AIzaSy..."
+                className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+              />
+              <p className="text-[10px] text-slate-500">
+                Bezplatný klíč získáte na{' '}
+                <a
+                  href="https://aistudio.google.com/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-400 underline font-semibold"
+                >
+                  aistudio.google.com/apikey
+                </a>
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setIsMissingKeyModalOpen(false)}
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active"
+              >
+                Zrušit
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!userApiKey.trim()) {
+                    showToast('Zadejte prosím API klíč.', 'warning');
+                    return;
+                  }
+                  safeStorage.setItem('ubyport_user_api_key', userApiKey.trim());
+                  setIsMissingKeyModalOpen(false);
+                  showToast('API klíč byl uložen!', 'success');
+                  if (imagePreview) {
+                    processImageWithOcr(imagePreview);
+                  }
+                }}
+                className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer shadow-lg shadow-blue-600/30"
+              >
+                Uložit a skenovat
+              </button>
+            </div>
           </div>
         </div>
       )}
