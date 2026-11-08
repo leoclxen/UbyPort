@@ -225,14 +225,14 @@ app.post('/api/guests', (req, res) => {
     lastName: (g.lastName || '').trim(),
     fullName: (g.fullName || `${g.firstName || ''} ${g.lastName || ''}`).trim() || 'Host',
     birthDate: g.birthDate || '',
-    nationality: (g.nationality || 'DEU').trim().toUpperCase(),
-    residenceCountry: (g.residenceCountry || g.nationality || 'DEU').trim().toUpperCase(),
+    nationality: (g.nationality || '').trim().toUpperCase(),
+    residenceCountry: (g.residenceCountry || g.nationality || '').trim().toUpperCase(),
     city: (g.city || '').trim(),
     street: (g.street || '').trim(),
     address: (g.address || '').trim(),
     idDocumentType: (g.idDocumentType || 'PAS').trim().toUpperCase(),
     idDocumentNumber: (g.idDocumentNumber || '').trim(),
-    documentIssuerCountry: (g.documentIssuerCountry || g.nationality || 'DEU').trim().toUpperCase(),
+    documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
     visaNumber: (g.visaNumber || '').trim(),
     purposeOfStay: (g.purposeOfStay || '1').trim(),
     dateArrival: g.dateArrival || '',
@@ -311,14 +311,14 @@ app.post('/api/batch-guests', (req, res) => {
         lastName: (g.lastName || '').trim(),
         fullName: (g.fullName || `${g.firstName || ''} ${g.lastName || ''}`).trim() || 'Host',
         birthDate: g.birthDate || '',
-        nationality: (g.nationality || 'DEU').trim().toUpperCase(),
-        residenceCountry: (g.residenceCountry || g.nationality || 'DEU').trim().toUpperCase(),
+        nationality: (g.nationality || '').trim().toUpperCase(),
+        residenceCountry: (g.residenceCountry || g.nationality || '').trim().toUpperCase(),
         city: (g.city || '').trim(),
         street: (g.street || '').trim(),
         address: (g.address || '').trim(),
         idDocumentType: (g.idDocumentType || 'PAS').trim().toUpperCase(),
         idDocumentNumber: (g.idDocumentNumber || '').trim(),
-        documentIssuerCountry: (g.documentIssuerCountry || g.nationality || 'DEU').trim().toUpperCase(),
+        documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
         visaNumber: (g.visaNumber || '').trim(),
         purposeOfStay: (g.purposeOfStay || '1').trim(),
         dateArrival: g.dateArrival || '',
@@ -398,9 +398,11 @@ app.post('/api/import/yaml', (req, res) => {
 // ----------------------------------------------------
 
 const CANDIDATE_FLASH_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
   'gemini-flash-latest',
-  'gemini-3.8-flash',
-  'gemini-3.1-flash-lite'
+  'gemini-1.5-flash',
+  'gemini-2.5-pro'
 ];
 
 app.post('/api/ocr', async (req, res) => {
@@ -432,38 +434,43 @@ app.post('/api/ocr', async (req, res) => {
 
     const promptInstructions = `
 Jsi špičkový OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes UbyPort 2.0.
+Formulář může být orientován libovolně: svisle, vodorovně, i otočený o 90°, 180° nebo 270°.
 
-Struktura formuláře (může být orientován svisle nebo vodorovně):
-1. HLAVIČKA A IDENTIFIKACE ZAŘÍZENÍ:
-   - Check-in (Příjezd) - např. Oct 1, 2026 -> převeď na ISO YYYY-MM-DD (2026-10-01).
-   - Check-out (Odjezd) - např. Oct 8, 2026 -> převeď na ISO YYYY-MM-DD (2026-10-08).
-   - Počet nocí (nights) - např. 7 nights -> číslo 7.
-   - Označení jednotky / pokoje (unit) - např. Unit E302 nebo 102.
-   - Název rezidence / ubytování (např. Karolina Plazza - Karlín).
-   - Adresa ubytování (např. Sokolovská 694/102, 186 00 Praha 8).
-   - IDUB ubytovacího zařízení (např. CZ1234567890, pokud je uvedeno).
-   - Zkratka zařízení (např. HOTEL, APART, max 5 znaků, pokud je uvedeno).
-   - Ubytovatel / Hostitel (např. Bc. Michaela Heidenreichová).
+Struktura formuláře:
+1. HLAVIČKA POBYTU A ZAŘÍZENÍ:
+   - Check-in: převeď na ISO datum YYYY-MM-DD (např. 'OCT 1, 2026' -> '2026-10-01').
+   - Check-out: převeď na ISO datum YYYY-MM-DD (např. 'OCT 8, 2026' -> '2026-10-08').
+   - Počet nocí (nights): celé číslo z pole 'nights' (např. '7 nights' -> 7).
+   - Označení jednotky / pokoje (detectedUnit): např. 'Unit E302' nebo '102'.
+   - Název rezidence / ubytování (detectedPropertyName): např. 'Karolina Plazza - Karlín'.
+   - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8'.
+   - IDUB ubytovacího zařízení (detectedIDUB): pokud je uvedeno (např. CZ1234567890).
+   - Zkratka zařízení (detectedFacilityCode): max 5 znaků (např. HOTEL, APART).
+   - Ubytovatel / Hostitel (detectedHostName): např. 'Bc. Michaela Heidenreichová'.
+   - IČO / Variabilní symbol (detectedVS): např. '17974305'.
 
 2. TABULKA UBYTOVANÝCH OSOB:
-   - Zpracuj pouze skutečně fyzicky vyplněné řádky! Prázdné řádky ignoruj.
-   - Do hodnot polí vkládej POUZE čistá data bez vysvětlivek.
+   - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
+   - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
-     * Příjmení (Last name) - např. Kinkaid
-     * Jméno (First name) - např. Kenneth
-     * Datum narození (Date of birth) - ve formátu ISO YYYY-MM-DD (např. 01.10.1971 -> 1971-10-01)
-     * Státní občanství / státní příslušnost (Citizenship) - 3místný ISO kód (např. USA, DEU, GBR, SVK, POL, ITA, FRA)
-     * Stát trvalého bydliště - 3místný ISO kód
-     * Obec trvalého bydliště (City) - např. Littleton
-     * Ulice a číslo domu bydliště (Street and house number) - např. 6917 S Queen St
-     * Celá adresa bydliště (Home Address)
-     * Druh dokladu - PAS (cestovní pas) nebo OP (občanský průkaz)
-     * Číslo cestovního dokladu (Passport / ID No) - např. A50465791
-     * Stát vydání dokladu - 3místný ISO kód
-     * Číslo víza (Visa No) - pokud je uvedeno, jinak ""
-     * Účel pobytu - číselný kód dle číselníku (1 = turistika, 2 = zaměstnání, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní)
-
-DŮLEŽITÉ: Každou osobu zahrň do pole 'guests' pouze JEDNOU. Všechny osoby na jednom lístku sdílejí Check-in, Check-out a počet nocí z hlavičky lístku.
+     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY bez diakritiky (např. KINKAID).
+     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY bez diakritiky (např. KENNETH).
+     * birthDate: Datum narození ze sloupce 'datum narození / Date of birth' ve formátu ISO YYYY-MM-DD (např. '01.10.1971' -> '1971-10-01').
+     * nationality: Státní příslušnost / občanství ze sloupce 'státní občanství / Citizenship'.
+       KRITICKÉ: VŽDY převeď na 3místný ISO 3166-1 alpha-3 kód.
+       Pokud je napsáno 'USA', 'US' nebo 'United States', MUSÍ BÝT 'USA'! NIKDY nenastavuj 'DEU'!
+       Pokud je 'DE' nebo 'Germany', 'DEU'.
+       Pokud je 'GB' nebo 'UK', 'GBR'.
+       Pokud je 'CZ' nebo 'Česká', 'CZE'.
+       Pokud je 'SK' nebo 'Slovensko', 'SVK'.
+     * passportNumber: Číslo cestovního pasu nebo OP ze sloupce 'č. cestovního dokladu / Passport No'.
+       KRITICKÉ: Pokud je ve sloupci cokoliv napsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
+     * documentType: 'OP' pro občanský průkaz (ID card), 'PAS' pro cestovní pas. Pokud není zřejmé, použij 'PAS'.
+     * homeAddress: Celá adresa ze sloupce 'trvalé bydliště v zahraničí / Home Address' (např. '6917 S Queen St, Littleton Co').
+     * city: Město trvalého bydliště z adresy (např. 'Littleton').
+     * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
+     * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
+     * purposeOfStay: Číslo účelu pobytu dle zaškrtnutého checkboxu (1 = turistika / leisure, 2 = zaměstnání / práce, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní).
 `;
 
     const modelQueue: string[] = [];

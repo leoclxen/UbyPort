@@ -34,7 +34,9 @@ import {
   FileDown,
   FileUp,
   AlertCircle,
-  Globe
+  Globe,
+  Loader2,
+  Search
 } from 'lucide-react';
 import { Property, Guest, PRAGUE_DISTRICTS } from './types';
 import { User } from 'firebase/auth';
@@ -102,25 +104,119 @@ const safeStorage = {
   }
 };
 
+const syncServerApi = async (url: string, options: RequestInit) => {
+  if (typeof window === 'undefined') return;
+  const isLocalDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  if (!isLocalDev) return;
+  try {
+    await fetch(url, options);
+  } catch {
+    // non-blocking for local dev
+  }
+};
+
+/**
+ * Rychlá klientská optimalizace a komprese obrázku na canvasu před odesláním do Gemini OCR.
+ * Zmenší 15-35MB fotky z mobilního foťáku na max 1800px a cca 350KB JPEG.
+ * Tím zabrání pádům paměti, timeoutům a zasekávání na GitHub Pages a zrychlí OCR z 30s na 2s.
+ */
+export function optimizeImageForOcr(
+  fileOrDataUrl: File | string,
+  maxDimension: number = 1800,
+  quality: number = 0.88
+): Promise<{ dataUrl: string; mimeType: string }> {
+  return new Promise((resolve, reject) => {
+    const processImageElement = (img: HTMLImageElement) => {
+      let width = img.naturalWidth || img.width;
+      let height = img.naturalHeight || img.height;
+
+      if (!width || !height) {
+        if (typeof fileOrDataUrl === 'string') {
+          resolve({ dataUrl: fileOrDataUrl, mimeType: 'image/jpeg' });
+        } else {
+          reject(new Error('Neplatný nebo prázdný obrázek'));
+        }
+        return;
+      }
+
+      if (width > height) {
+        if (width > maxDimension) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        }
+      } else {
+        if (height > maxDimension) {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        if (typeof fileOrDataUrl === 'string') {
+          resolve({ dataUrl: fileOrDataUrl, mimeType: 'image/jpeg' });
+        } else {
+          reject(new Error('Canvas kontext není dostupný'));
+        }
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+      const optimizedUrl = canvas.toDataURL('image/jpeg', quality);
+      resolve({ dataUrl: optimizedUrl, mimeType: 'image/jpeg' });
+    };
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => processImageElement(img);
+    img.onerror = (e) => {
+      if (typeof fileOrDataUrl === 'string') {
+        resolve({ dataUrl: fileOrDataUrl, mimeType: 'image/jpeg' });
+      } else {
+        reject(e);
+      }
+    };
+
+    if (typeof fileOrDataUrl === 'string') {
+      img.src = fileOrDataUrl;
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        img.src = (e.target?.result as string) || '';
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(fileOrDataUrl);
+    }
+  });
+}
+
 export default function App() {
   // App State - Zero hardcoded data
   const [properties, setProperties] = useState<Property[]>([]);
   const [activePropertyId, setActivePropertyId] = useState<string>('');
   const [guests, setGuests] = useState<Guest[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'scan' | 'ledger' | 'export' | 'info'>('scan');
+  const [activeTab, setActiveTab] = useState<'scan' | 'ledger' | 'properties' | 'export' | 'info'>('scan');
   const [ledgerFilter, setLedgerFilter] = useState<'all' | 'foreigners' | 'czech'>('all');
+  const [propSearchQuery, setPropSearchQuery] = useState<string>('');
 
   // OCR & Model State
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanStatus, setScanStatus] = useState<string>('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [activeModelName, setActiveModelName] = useState<string>(
-    safeStorage.getItem('ubyport_model_pref') || 'gemini-flash-latest'
+    safeStorage.getItem('ubyport_model_pref') || safeStorage.getItem('airtax_working_model') || 'gemini-2.5-flash'
   );
   const [userApiKey, setUserApiKey] = useState<string>(
-    safeStorage.getItem('ubyport_user_api_key') || ''
+    safeStorage.getItem('ubyport_user_api_key') ||
+    safeStorage.getItem('airtax_secure_key_blob') ||
+    safeStorage.getItem('airtax_gemini_key') ||
+    safeStorage.getItem('gemini_api_key') || ''
   );
+  const ocrAbortControllerRef = useRef<AbortController | null>(null);
 
   // Google Workspace & Sheets State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -166,6 +262,7 @@ export default function App() {
   } | null>(null);
   const [scanTargetChoice, setScanTargetChoice] = useState<'existing' | 'new'>('existing');
   const [selectedScanPropId, setSelectedScanPropId] = useState<string>('');
+  const [detectedPropMatch, setDetectedPropMatch] = useState<{ property: Property; matchReasons: string[] } | null>(null);
   const [scanNewPropForm, setScanNewPropForm] = useState({
     name: '',
     idub: '',
@@ -250,17 +347,25 @@ export default function App() {
     try {
       setIsLoading(true);
       let loadedFromServer = false;
-      try {
-        const res = await fetch('/api/data');
-        if (res.ok) {
-          const data = await res.json();
-          setProperties(data.properties || []);
-          setGuests(data.guests || []);
-          setActivePropertyId(data.activePropertyId || (data.properties?.[0]?.id ?? ''));
-          loadedFromServer = true;
+      const isLocalDev = typeof window !== 'undefined' && (
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1'
+      );
+
+      if (isLocalDev) {
+        try {
+          const res = await fetch('/api/data');
+          const contentType = res.headers.get('content-type') || '';
+          if (res.ok && contentType.includes('application/json')) {
+            const data = await res.json();
+            setProperties(data.properties || []);
+            setGuests(data.guests || []);
+            setActivePropertyId(data.meta?.activePropertyId || data.activePropertyId || (data.properties?.[0]?.id ?? ''));
+            loadedFromServer = true;
+          }
+        } catch {
+          // Expected when hosted statically without Node backend
         }
-      } catch {
-        // Expected when hosted statically without Node backend
       }
 
       if (!loadedFromServer) {
@@ -289,6 +394,9 @@ export default function App() {
   // 2. Initialize Firebase Auth
   useEffect(() => {
     fetchCloudData();
+    if (userApiKey && userApiKey.trim()) {
+      refreshModelsList(userApiKey.trim());
+    }
     const unsubscribe = initAuth((user) => {
       setCurrentUser(user);
       if (user) {
@@ -319,6 +427,7 @@ export default function App() {
       if (sheetData.apiKey && sheetData.apiKey.trim().length > 0) {
         setUserApiKey(sheetData.apiKey);
         safeStorage.setItem('ubyport_user_api_key', sheetData.apiKey);
+        refreshModelsList(sheetData.apiKey);
       }
       if (sheetData.preferredModel) {
         setActiveModelName(sheetData.preferredModel);
@@ -331,25 +440,21 @@ export default function App() {
         setActivePropertyId(sheetData.properties[0].id);
         persistLocalState(sheetData.properties, sheetData.guests || [], sheetData.properties[0].id);
 
-        try {
-          await fetch('/api/import/yaml', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              yamlContent: jsyaml.dump({
-                meta: {
-                  version: '3.1',
-                  lastUpdated: new Date().toISOString(),
-                  activePropertyId: sheetData.properties[0].id
-                },
-                properties: sheetData.properties,
-                guests: sheetData.guests || []
-              })
+        await syncServerApi('/api/import/yaml', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            yamlContent: jsyaml.dump({
+              meta: {
+                version: '3.1',
+                lastUpdated: new Date().toISOString(),
+                activePropertyId: sheetData.properties[0].id
+              },
+              properties: sheetData.properties,
+              guests: sheetData.guests || []
             })
-          });
-        } catch {
-          // ignore backend sync error
-        }
+          })
+        });
 
         const keyMsg = sheetData.apiKey ? ' (včetně Gemini API klíče)' : '';
         showToast(`Načteno z Google Sheetu: ${sheetData.properties.length} ubytování, ${sheetData.guests.length} hostů${keyMsg}!`, 'success');
@@ -498,15 +603,11 @@ export default function App() {
 
     persistLocalState(updatedProps, guests, activePropertyId || propId);
 
-    try {
-      await fetch('/api/properties', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newProp)
-      });
-    } catch {
-      // server sync error
-    }
+    await syncServerApi('/api/properties', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newProp)
+    });
 
     triggerSheetSync(updatedProps, guests);
 
@@ -527,11 +628,7 @@ export default function App() {
 
     persistLocalState(updatedProps, updatedGuests, nextActiveId);
 
-    try {
-      await fetch(`/api/properties/${propId}`, { method: 'DELETE' });
-    } catch {
-      // server delete error
-    }
+    await syncServerApi(`/api/properties/${propId}`, { method: 'DELETE' });
 
     triggerSheetSync(updatedProps, updatedGuests);
     showToast('Ubytování bylo smazáno.', 'info');
@@ -646,15 +743,11 @@ export default function App() {
     setGuests(updatedGuests);
     persistLocalState(properties, updatedGuests);
 
-    try {
-      await fetch('/api/guests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(guestRecord)
-      });
-    } catch {
-      // server save error
-    }
+    await syncServerApi('/api/guests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(guestRecord)
+    });
 
     triggerSheetSync(properties, updatedGuests);
     setIsGuestModalOpen(false);
@@ -672,11 +765,7 @@ export default function App() {
     setGuests(updatedGuests);
     persistLocalState(properties, updatedGuests);
 
-    try {
-      await fetch(`/api/guests/${guestId}`, { method: 'DELETE' });
-    } catch {
-      // server delete error
-    }
+    await syncServerApi(`/api/guests/${guestId}`, { method: 'DELETE' });
 
     triggerSheetSync(properties, updatedGuests);
     showToast('Host byl odstraněn.', 'info');
@@ -759,18 +848,14 @@ export default function App() {
     setGuests(mergedGuests);
     persistLocalState(updatedProps, mergedGuests, targetProp?.id);
 
-    try {
-      await fetch('/api/batch-guests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property: targetProp,
-          guests: finalGuests
-        })
-      });
-    } catch {
-      // server batch error
-    }
+    await syncServerApi('/api/batch-guests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        property: targetProp,
+        guests: finalGuests
+      })
+    });
 
     triggerSheetSync(updatedProps, mergedGuests);
     setIsUnlImportModalOpen(false);
@@ -809,6 +894,17 @@ export default function App() {
     showToast(`UNL zkopírován do schránky (${result.includedCount} řádků).`, 'success');
   };
 
+  // Cancel scanning in progress
+  const handleCancelScan = () => {
+    if (ocrAbortControllerRef.current) {
+      ocrAbortControllerRef.current.abort();
+      ocrAbortControllerRef.current = null;
+    }
+    setIsScanning(false);
+    setScanStatus('');
+    showToast('Skenování bylo zrušeno.', 'info');
+  };
+
   // OCR SCAN ENGINE
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -826,14 +922,19 @@ export default function App() {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const b64 = reader.result as string;
-      setImagePreview(b64);
+    try {
+      setIsScanning(true);
+      setScanStatus('Optimalizuji snímek pro rozpoznání...');
+      const optimized = await optimizeImageForOcr(file, 1800, 0.88);
+      setImagePreview(optimized.dataUrl);
       e.target.value = '';
-      await processImageWithOcr(b64, file.type || 'image/jpeg');
-    };
-    reader.readAsDataURL(file);
+      await processImageWithOcr(optimized.dataUrl, optimized.mimeType);
+    } catch (err: any) {
+      console.error('File load error:', err);
+      setIsScanning(false);
+      setScanStatus('');
+      showToast(err.message || 'Nepodařilo se načíst soubor.', 'warning');
+    }
   };
 
   // Helper for rotating photo by 90 degrees in browser
@@ -857,7 +958,7 @@ export default function App() {
         ctx.translate(canvas.width / 2, canvas.height / 2);
         ctx.rotate((degrees * Math.PI) / 180);
         ctx.drawImage(img, -img.width / 2, -img.height / 2);
-        resolve(canvas.toDataURL('image/jpeg', 0.95));
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
       };
       img.onerror = () => resolve(base64);
       img.src = base64;
@@ -876,46 +977,56 @@ export default function App() {
   };
 
   const processImageWithOcr = async (base64Data: string, mimeType: string = 'image/jpeg') => {
+    if (ocrAbortControllerRef.current) {
+      ocrAbortControllerRef.current.abort();
+    }
+    const abortController = new AbortController();
+    ocrAbortControllerRef.current = abortController;
+
     const hasClientKey = Boolean(userApiKey && userApiKey.trim().length > 0);
-    const isStaticHost = typeof window !== 'undefined' && (
-      window.location.hostname.includes('github.io') ||
-      window.location.protocol === 'file:' ||
-      (window.location.hostname !== 'localhost' && !window.location.port)
+    const isLocalDev = typeof window !== 'undefined' && (
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1'
     );
 
-    // Na GitHub Pages (statický hosting) bez zadaného API klíče ihned otevřeme zadání klíče
-    if (!hasClientKey && isStaticHost) {
+    // Na statickém hostingu bez zadaného API klíče ihned otevřeme zadání klíče
+    if (!hasClientKey && !isLocalDev) {
+      setIsScanning(false);
       setIsMissingKeyModalOpen(true);
-      showToast('Na GitHub Pages zadejte svůj Gemini API klíč v okně níže.', 'info');
+      showToast('Zadejte svůj Gemini API klíč v okně níže pro spuštění skenování.', 'info');
       return;
     }
 
     setIsScanning(true);
-    setScanStatus(`Čtení ubytovacího lístku modelem ${activeModelName}...`);
+    setScanStatus(`Analyzuji formulář pomocí Gemini (${activeModelName})...`);
 
     try {
       let resultData: any = null;
       let lastClientError: any = null;
 
-      // 1. Zkusíme přímé klientské volání přes Google GenAI SDK
+      // 1. Zkusíme přímé klientské volání přes Google GenAI / Gemini REST API
       if (hasClientKey) {
         try {
           const clientRes = await runClientGeminiOcr(
             base64Data,
             userApiKey.trim(),
             activeModelName,
-            mimeType
+            mimeType,
+            abortController.signal
           );
           resultData = clientRes.data;
           setScanStatus(`Úspěšně zpracováno modelem ${clientRes.modelUsed}!`);
         } catch (clientErr: any) {
+          if (abortController.signal.aborted) {
+            return;
+          }
           console.warn('Klientské volání OCR selhalo:', clientErr);
           lastClientError = clientErr;
         }
       }
 
-      // 2. Fallback na serverové proxy API (pouze pokud nejsme na čistě statickém hostingu jako GitHub Pages)
-      if (!resultData && !isStaticHost) {
+      // 2. Fallback na serverové proxy API (POUZE na lokálním vývojovém serveru localhost:3000)
+      if (!resultData && isLocalDev && !abortController.signal.aborted) {
         try {
           const response = await fetch('/api/ocr', {
             method: 'POST',
@@ -925,7 +1036,8 @@ export default function App() {
               mimeType,
               userApiKey: userApiKey || undefined,
               preferredModel: activeModelName
-            })
+            }),
+            signal: abortController.signal
           });
 
           const contentType = response.headers.get('content-type') || '';
@@ -941,10 +1053,6 @@ export default function App() {
             resultData = data.data;
             setScanStatus(`Zpracováno modelem ${data.modelUsed || activeModelName}!`);
           } else {
-            // Server vrátil ne-JSON (např. 404 HTML)
-            if (response.status === 404) {
-              throw new Error('Serverové OCR API není na této doméně dostupné. Zadejte prosím Gemini API klíč v Nastavení pro přímé čtení v prohlížeči.');
-            }
             const errText = await response.text();
             throw new Error(`Chyba serveru (${response.status}): ${errText.slice(0, 80)}`);
           }
@@ -958,10 +1066,14 @@ export default function App() {
         throw lastClientError;
       }
 
+      if (abortController.signal.aborted) {
+        return;
+      }
+
       if (!resultData) {
         if (!hasClientKey) {
           setIsMissingKeyModalOpen(true);
-          throw new Error('Na tomto hostingu je pro OCR skenování vyžadován Gemini API klíč. Zadejte jej prosím v nastavení.');
+          throw new Error('Pro OCR skenování je vyžadován Gemini API klíč. Zadejte jej prosím v nastavení.');
         }
         throw new Error('Nepodařilo se zpracovat obrázek ubytovacího lístku.');
       }
@@ -972,18 +1084,56 @@ export default function App() {
           guests: resultData.guests
         });
 
-        const detectedName = resultData.detectedPropertyName || '';
-        const detectedAddress = resultData.detectedAddress || '';
-        const detectedIdub = resultData.detectedIDUB || '';
-        const detectedFacilityCode = resultData.detectedFacilityCode || '';
-        const detectedHost = resultData.detectedHostName || '';
+        const detectedName = (resultData.detectedPropertyName || '').trim();
+        const detectedAddress = (resultData.detectedAddress || '').trim();
+        const detectedIdub = cleanAsciiUpper(resultData.detectedIDUB || '').replace(/\s/g, '');
+        const detectedFacilityCode = cleanAsciiUpper(resultData.detectedFacilityCode || '').replace(/\s/g, '').substring(0, 5);
+        const detectedHost = (resultData.detectedHostName || '').trim();
 
-        const existingMatch = properties.find(p =>
-          detectedName && p.name.toLowerCase().includes(detectedName.toLowerCase())
-        );
+        // Nalezení shody s existujícími ubytovacími zařízeními
+        let bestMatch: { property: Property; matchReasons: string[] } | null = null;
+        let maxMatchScore = 0;
 
-        if (existingMatch) {
-          setSelectedScanPropId(existingMatch.id);
+        for (const p of properties) {
+          const reasons: string[] = [];
+          let score = 0;
+
+          const pIdub = cleanAsciiUpper(p.idub || '').replace(/\s/g, '');
+          if (detectedIdub && pIdub && detectedIdub === pIdub) {
+            reasons.push(`IDUB (${p.idub})`);
+            score += 10;
+          }
+
+          const pCode = cleanAsciiUpper(p.facilityCode || '').replace(/\s/g, '');
+          if (detectedFacilityCode && pCode && detectedFacilityCode === pCode) {
+            reasons.push(`Zkratka zařízení (${p.facilityCode})`);
+            score += 8;
+          }
+
+          const pNameLower = p.name.trim().toLowerCase();
+          const dNameLower = detectedName.toLowerCase();
+          if (dNameLower && pNameLower && (pNameLower.includes(dNameLower) || dNameLower.includes(pNameLower))) {
+            reasons.push(`Název (${p.name})`);
+            score += 6;
+          }
+
+          const pAddrLower = (p.address || '').toLowerCase();
+          const dAddrLower = detectedAddress.toLowerCase();
+          if (dAddrLower && pAddrLower && (pAddrLower.includes(dAddrLower) || dAddrLower.includes(pAddrLower))) {
+            reasons.push(`Adresa (${p.address})`);
+            score += 4;
+          }
+
+          if (score > maxMatchScore) {
+            maxMatchScore = score;
+            bestMatch = { property: p, matchReasons: reasons };
+          }
+        }
+
+        setDetectedPropMatch(bestMatch);
+
+        if (bestMatch) {
+          setSelectedScanPropId(bestMatch.property.id);
           setScanTargetChoice('existing');
         } else if (properties.length > 0) {
           setSelectedScanPropId(activePropertyId || properties[0].id);
@@ -1086,18 +1236,14 @@ export default function App() {
     setGuests(updatedGuests);
     persistLocalState(updatedProps, updatedGuests, targetPropId);
 
-    try {
-      await fetch('/api/batch-guests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property: parentProp,
-          guests: newGuests
-        })
-      });
-    } catch {
-      // server batch error
-    }
+    await syncServerApi('/api/batch-guests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        property: parentProp,
+        guests: newGuests
+      })
+    });
 
     triggerSheetSync(updatedProps, updatedGuests);
 
@@ -1137,7 +1283,7 @@ export default function App() {
     setIsWebcamOpen(false);
   };
 
-  const captureWebcamPhoto = () => {
+  const captureWebcamPhoto = async () => {
     if (!webcamVideoRef.current || !webcamCanvasRef.current) return;
     const video = webcamVideoRef.current;
     const canvas = webcamCanvasRef.current;
@@ -1148,26 +1294,45 @@ export default function App() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const b64 = canvas.toDataURL('image/jpeg', 0.95);
       closeWebcam();
-      setImagePreview(b64);
-      processImageWithOcr(b64, 'image/jpeg');
+      try {
+        setIsScanning(true);
+        setScanStatus('Optimalizuji snímek z kamery...');
+        const optimized = await optimizeImageForOcr(b64, 1800, 0.88);
+        setImagePreview(optimized.dataUrl);
+        await processImageWithOcr(optimized.dataUrl, optimized.mimeType);
+      } catch {
+        setImagePreview(b64);
+        processImageWithOcr(b64, 'image/jpeg');
+      }
     }
   };
 
   // MODEL SELECTION
-  const openModelSelector = async () => {
-    setIsModelSelectorOpen(true);
+  const refreshModelsList = async (keyToUse?: string) => {
+    const key = (keyToUse || userApiKey || '').trim();
+    if (!key) return;
+    setIsLoadingModels(true);
     setModelsError(null);
-    if (userApiKey && userApiKey.trim().length > 0) {
-      setIsLoadingModels(true);
-      try {
-        const fetched = await fetchAvailableGeminiModels(userApiKey);
+    try {
+      const fetched = await fetchAvailableGeminiModels(key);
+      if (fetched && fetched.length > 0) {
         setAvailableModels(fetched);
-      } catch (err: any) {
-        setModelsError(err.message || 'Nepodařilo se načíst seznam modelů.');
-      } finally {
-        setIsLoadingModels(false);
       }
+    } catch (err: any) {
+      console.warn('Nepodařilo se načíst modely z Google API:', err);
+      setModelsError(err.message || 'Nepodařilo se načíst seznam modelů.');
+    } finally {
+      setIsLoadingModels(false);
     }
+  };
+
+  const openModelSelector = async () => {
+    if (!userApiKey || !userApiKey.trim()) {
+      setIsMissingKeyModalOpen(true);
+      return;
+    }
+    setIsModelSelectorOpen(true);
+    refreshModelsList(userApiKey.trim());
   };
 
   const selectModel = async (modelName: string) => {
@@ -1189,6 +1354,7 @@ export default function App() {
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     safeStorage.setItem('ubyport_user_api_key', userApiKey.trim());
+    safeStorage.setItem('airtax_secure_key_blob', userApiKey.trim());
     safeStorage.setItem('ubyport_model_pref', activeModelName);
 
     if (googleToken && connectedSheet) {
@@ -1206,6 +1372,10 @@ export default function App() {
       }
     } else {
       showToast('Nastavení bylo uloženo lokálně.', 'success');
+    }
+
+    if (userApiKey.trim()) {
+      refreshModelsList(userApiKey.trim());
     }
 
     setIsSettingsModalOpen(false);
@@ -1296,31 +1466,43 @@ export default function App() {
       )}
 
       {/* TOP HEADER */}
-      <header className="header-sharp bg-[#0D131F]/90 border-b border-slate-800/80 px-4 pb-3 flex items-center justify-between z-30 shrink-0 backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-500 to-rose-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+      <header className="header-sharp bg-[#0D131F]/90 border-b border-slate-800/80 px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2 z-30 shrink-0 backdrop-blur-md">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-500 to-rose-500 flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
             <ShieldCheck className="w-5 h-5 text-white" />
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <h1 className="text-sm font-extrabold tracking-tight text-white">UbyPort 2.0</h1>
-              <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                Policie ČR
+              <h1 className="text-sm font-extrabold tracking-tight text-white truncate">UbyExport</h1>
+              <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">
+                UbyPort 2.0
               </span>
             </div>
-            <button
-              onClick={openModelSelector}
-              className="text-[11px] text-slate-400 hover:text-blue-300 font-mono flex items-center gap-1 tap-active mt-0.5 cursor-pointer"
-            >
-              <Zap className="w-3 h-3 text-amber-400" />
-              <span>{activeModelName}</span>
-              <ChevronDown className="w-2.5 h-2.5" />
-            </button>
+            {!userApiKey || !userApiKey.trim() ? (
+              <button
+                onClick={() => setIsMissingKeyModalOpen(true)}
+                className="text-[11px] text-amber-400 hover:text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-lg font-semibold flex items-center gap-1.5 tap-active mt-0.5 cursor-pointer shadow-sm shadow-amber-500/10 animate-pulse"
+                title="Klikněte pro zadání Google API klíče"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Google API klíč</span>
+              </button>
+            ) : (
+              <button
+                onClick={openModelSelector}
+                className="text-[11px] text-slate-400 hover:text-blue-300 font-mono flex items-center gap-1 tap-active mt-0.5 cursor-pointer truncate max-w-[140px]"
+                title="Změnit Gemini model"
+              >
+                <Zap className="w-3 h-3 text-amber-400 shrink-0" />
+                <span className="truncate">{activeModelName}</span>
+                <ChevronDown className="w-2.5 h-2.5 shrink-0" />
+              </button>
+            )}
           </div>
         </div>
 
         {/* PROPERTY PICKER & HEADER CONTROLS */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {/* Ubytování selector */}
           <div className="relative">
             <button
@@ -1328,7 +1510,7 @@ export default function App() {
                 setPropModalMode('list');
                 setIsPropModalOpen(true);
               }}
-              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-white tap-active cursor-pointer max-w-[155px]"
+              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-white tap-active cursor-pointer max-w-[145px] sm:max-w-[170px]"
             >
               <Building className="w-3.5 h-3.5 text-blue-400 shrink-0" />
               <span className="truncate">
@@ -1338,7 +1520,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Google Sheets button */}
+          {/* Google Sheets / Drive status button */}
           {currentUser ? (
             <button
               onClick={() => {
@@ -1348,21 +1530,24 @@ export default function App() {
                   handleGoogleLogin();
                 }
               }}
-              title={connectedSheet ? `Otevřít: ${connectedSheet.title}` : 'Připojit Google Sheet'}
-              className="p-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-900 tap-active cursor-pointer relative"
+              title={connectedSheet ? `Otevřít sešit: ${connectedSheet.title}` : 'Google Disk připojen'}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900 tap-active cursor-pointer text-xs font-semibold relative"
             >
-              <FileSpreadsheet className="w-4 h-4" />
+              <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="hidden md:inline">Google Disk připojen</span>
               {isSyncingSheet && (
-                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping" />
+                <span className="w-2 h-2 bg-emerald-400 rounded-full animate-ping shrink-0" />
               )}
             </button>
           ) : (
             <button
               onClick={handleGoogleLogin}
-              title="Přihlásit se k účtu Google pro synchronizaci sešitu"
-              className="p-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 hover:text-white tap-active cursor-pointer"
+              title="Přihlásit se k účtu Google pro synchronizaci a ukládání na Google Disk"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 tap-active cursor-pointer text-xs font-semibold"
             >
-              <FileSpreadsheet className="w-4 h-4 text-slate-400" />
+              <FileSpreadsheet className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="hidden sm:inline">Google Disk: </span>
+              <span className="text-amber-400 font-bold">Nepřipojeno</span>
             </button>
           )}
 
@@ -1383,46 +1568,6 @@ export default function App() {
         {/* TAB 1: SCANNER & OCR */}
         {activeTab === 'scan' && (
           <div className="space-y-4">
-            {/* Top Property Info Banner with IDUB & Facility code */}
-            {activeProperty ? (
-              <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 flex items-center justify-between text-xs">
-                <div className="space-y-0.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-bold text-white text-sm">{activeProperty.name}</span>
-                    <span className="text-[10px] text-slate-400">({activeProperty.address || 'Praha'})</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-[11px] font-mono">
-                    <span className={activeProperty.idub ? 'text-emerald-400' : 'text-amber-400 font-bold'}>
-                      IDUB: {activeProperty.idub || 'Chybí IDUB!'}
-                    </span>
-                    <span className="text-slate-600">•</span>
-                    <span className={activeProperty.facilityCode ? 'text-blue-400' : 'text-amber-400 font-bold'}>
-                      Kód: {activeProperty.facilityCode || 'Chybí kód!'}
-                    </span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => openEditPropertyModal(activeProperty)}
-                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-750 text-slate-200 rounded-lg text-xs font-semibold tap-active"
-                >
-                  Upravit
-                </button>
-              </div>
-            ) : (
-              <div className="bg-amber-950/40 border border-amber-600/40 rounded-2xl p-3 flex items-center justify-between text-xs text-amber-200">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>Není nastaveno žádné ubytovací zařízení pro UbyPort.</span>
-                </div>
-                <button
-                  onClick={openNewPropertyModal}
-                  className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-bold tap-active"
-                >
-                  Přidat
-                </button>
-              </div>
-            )}
-
             {/* Scanning Card / Drag and Drop Area */}
             <div
               ref={dropZoneRef}
@@ -1440,75 +1585,126 @@ export default function App() {
                     reader.readAsText(file);
                     return;
                   }
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    const b64 = reader.result as string;
-                    setImagePreview(b64);
-                    processImageWithOcr(b64, file.type || 'image/jpeg');
-                  };
-                  reader.readAsDataURL(file);
+                  try {
+                    setIsScanning(true);
+                    setScanStatus('Optimalizuji snímek pro rozpoznání...');
+                    optimizeImageForOcr(file, 1800, 0.88).then(opt => {
+                      setImagePreview(opt.dataUrl);
+                      processImageWithOcr(opt.dataUrl, opt.mimeType);
+                    }).catch(err => {
+                      console.error('Drop error:', err);
+                      setIsScanning(false);
+                      setScanStatus('');
+                      showToast('Nepodařilo se zpracovat obrázek.', 'warning');
+                    });
+                  } catch (err: any) {
+                    setIsScanning(false);
+                    setScanStatus('');
+                    showToast(err.message || 'Chyba při nahrání.', 'warning');
+                  }
                 }
               }}
               className="relative overflow-hidden rounded-3xl border-2 border-dashed border-slate-750 bg-gradient-to-b from-slate-900/80 to-slate-950/80 p-6 flex flex-col items-center justify-center text-center shadow-xl"
             >
-              {isScanning && (
-                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-4">
-                  <div className="w-16 h-16 relative flex items-center justify-center mb-3">
-                    <div className="absolute inset-0 rounded-full border-4 border-blue-500/20 border-t-blue-500 animate-spin" />
-                    <Scan className="w-7 h-7 text-blue-400" />
-                  </div>
-                  <p className="text-sm font-bold text-white mb-1">Zpracovávám formulář...</p>
-                  <p className="text-xs text-blue-300 font-mono text-center max-w-xs">{scanStatus}</p>
-                </div>
-              )}
-
-              {imagePreview && !isScanning ? (
+              {imagePreview ? (
                 <div className="space-y-3 w-full max-w-md">
-                  <div className="relative rounded-2xl overflow-hidden border border-slate-700 bg-slate-950/90 p-2 min-h-[200px] max-h-[380px] flex items-center justify-center">
+                  <div className="relative rounded-2xl overflow-hidden border border-slate-700 bg-slate-950/90 p-2 min-h-[200px] max-h-[420px] flex items-center justify-center shadow-xl">
                     <img
                       src={imagePreview}
                       alt="Náhled ubytovacího lístku"
-                      className="max-h-[360px] max-w-full w-auto h-auto object-contain rounded-xl shadow-lg"
+                      className="max-h-[390px] max-w-full w-auto h-auto object-contain rounded-xl"
                     />
-                    <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10">
+
+                    {/* PŘI SKENOVÁNÍ: ANIMACE LASERU, STAVOVÝ PRUH A TLAČÍTKO ZRUŠIT */}
+                    {isScanning && (
+                      <>
+                        {/* Animovaný laserový paprsek přejíždějící přes náhled lístku */}
+                        <div className="animate-laser absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-blue-500 to-transparent shadow-[0_0_15px_#3b82f6] z-20 pointer-events-none" />
+
+                        {/* Jemný skenovací světelný filtr */}
+                        <div className="absolute inset-0 bg-blue-950/20 pointer-events-none z-10" />
+
+                        {/* Horní stavový pruh s ikonou a zrušením */}
+                        <div className="absolute top-3 inset-x-3 z-30 flex items-center justify-between bg-slate-900/95 backdrop-blur-md border border-slate-700/80 px-3.5 py-2 rounded-xl shadow-xl">
+                          <span className="text-xs font-semibold text-white flex items-center gap-2 truncate">
+                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
+                            <span className="truncate">{scanStatus || `Analyzuji formulář (${activeModelName})...`}</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleCancelScan}
+                            className="text-xs font-bold text-rose-400 hover:text-rose-300 tap-active px-2.5 py-1 rounded-lg bg-rose-950/40 border border-rose-800/50 shrink-0 ml-2"
+                          >
+                            Zrušit
+                          </button>
+                        </div>
+
+                        {/* Spodní informační štítek */}
+                        <div className="absolute bottom-3 inset-x-4 z-30 pointer-events-none text-center">
+                          <span className="text-[11px] text-blue-200/90 bg-slate-950/85 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-blue-500/25 shadow">
+                            Gemini rozpoznává jména, pas, občanství a termín pobytu...
+                          </span>
+                        </div>
+                      </>
+                    )}
+
+                    {/* TLAČÍTKA V PRAVÉM HORNÍM ROHU KDYŽ SE NESKENUJE */}
+                    {!isScanning && (
+                      <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10">
+                        <button
+                          type="button"
+                          onClick={handleRotateImage}
+                          title="Otočit obrázek o 90°"
+                          className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-white tap-active border border-slate-700/80 shadow-md flex items-center gap-1"
+                        >
+                          <RotateCcw className="w-4 h-4 text-blue-400" />
+                          <span className="text-[10px] font-semibold pr-1">Otočit</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImagePreview(null);
+                            setScanStatus('');
+                          }}
+                          title="Zavřít náhled"
+                          className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white tap-active border border-slate-700/80 shadow-md"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* OVLÁDACÍ TLAČÍTKA POD NÁHLEDEM KDYŽ SE NESKENUJE */}
+                  {!isScanning && (
+                    <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
                         onClick={handleRotateImage}
-                        title="Otočit obrázek o 90°"
-                        className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-white tap-active border border-slate-700/80 shadow-md flex items-center gap-1"
+                        className="py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active flex items-center justify-center gap-1.5 cursor-pointer"
                       >
-                        <RotateCcw className="w-4 h-4 text-blue-400" />
-                        <span className="text-[10px] font-semibold pr-1">Otočit</span>
+                        <RotateCcw className="w-3.5 h-3.5 text-blue-400" />
+                        <span>Otočit o 90°</span>
                       </button>
                       <button
                         type="button"
-                        onClick={() => setImagePreview(null)}
-                        title="Zavřít náhled"
-                        className="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white tap-active border border-slate-700/80 shadow-md"
+                        onClick={() => processImageWithOcr(imagePreview)}
+                        className="py-2.5 px-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/30"
                       >
-                        <X className="w-4 h-4" />
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Znovu rozpoznat přes Gemini</span>
                       </button>
                     </div>
+                  )}
+                </div>
+              ) : isScanning ? (
+                <div className="p-8 flex flex-col items-center justify-center text-center space-y-3">
+                  <div className="w-16 h-16 relative flex items-center justify-center mb-1">
+                    <div className="absolute inset-0 rounded-full border-4 border-blue-500/20 border-t-blue-500 animate-spin" />
+                    <Scan className="w-7 h-7 text-blue-400" />
                   </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={handleRotateImage}
-                      className="py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active flex items-center justify-center gap-1.5"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Otočit o 90°</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => processImageWithOcr(imagePreview)}
-                      className="py-2.5 px-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/30"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Spustit skenování</span>
-                    </button>
-                  </div>
+                  <p className="text-sm font-bold text-white">Připravuji snímek...</p>
+                  <p className="text-xs text-blue-300 font-mono">{scanStatus}</p>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -1752,6 +1948,207 @@ export default function App() {
           </div>
         )}
 
+        {/* TAB: PROPERTIES (UBYTOVACÍ ZAŘÍZENÍ) */}
+        {activeTab === 'properties' && (
+          <div className="space-y-4">
+            {/* Header with Search and Add Property */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-white">Ubytovací zařízení</h2>
+                <p className="text-xs text-slate-400">
+                  Celkem {properties.length} ubytovacích míst • Aktivní:{' '}
+                  <span className="text-blue-400 font-semibold">{activeProperty ? activeProperty.name : 'Žádné'}</span>
+                </p>
+              </div>
+              <button
+                onClick={openNewPropertyModal}
+                className="py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 tap-active cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Přidat zařízení</span>
+              </button>
+            </div>
+
+            {/* SEARCH BAR */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={propSearchQuery}
+                onChange={e => setPropSearchQuery(e.target.value)}
+                placeholder="Hledat ubytování podle názvu, IDUB, zkratky, adresy..."
+                className="w-full bg-slate-900 border border-slate-800 text-white rounded-xl pl-9 pr-8 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none placeholder:text-slate-500"
+              />
+              {propSearchQuery && (
+                <button
+                  onClick={() => setPropSearchQuery('')}
+                  className="absolute right-3 top-2.5 text-slate-400 hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* STATS */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold">Zařízení</span>
+                <p className="text-xl font-black text-white mt-0.5">{properties.length}</p>
+              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 truncate">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold">Aktivní výběr</span>
+                <p className="text-xs font-bold text-blue-400 mt-1 truncate">
+                  {activeProperty ? activeProperty.name : 'Nevybráno'}
+                </p>
+              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold">Hostů celkem</span>
+                <p className="text-xl font-black text-emerald-400 mt-0.5">{guests.length}</p>
+              </div>
+            </div>
+
+            {/* PROPERTIES LIST */}
+            {properties.length === 0 ? (
+              <div className="bg-slate-900/60 border border-slate-800/80 rounded-3xl p-8 text-center space-y-3">
+                <Building className="w-10 h-10 text-slate-600 mx-auto" />
+                <p className="text-sm font-semibold text-slate-300">Zatím nemáte vytvořené žádné ubytovací zařízení</p>
+                <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                  Přidejte své první ubytovací zařízení s kódem IDUB a 5místnou zkratkou pro generování UNL souborů.
+                </p>
+                <button
+                  onClick={openNewPropertyModal}
+                  className="mt-2 py-2 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold tap-active"
+                >
+                  Přidat první ubytování
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {properties
+                  .filter(p => {
+                    if (!propSearchQuery.trim()) return true;
+                    const q = propSearchQuery.toLowerCase();
+                    return (
+                      p.name.toLowerCase().includes(q) ||
+                      (p.idub || '').toLowerCase().includes(q) ||
+                      (p.facilityCode || '').toLowerCase().includes(q) ||
+                      (p.address || '').toLowerCase().includes(q) ||
+                      (p.hostName || '').toLowerCase().includes(q)
+                    );
+                  })
+                  .map(prop => {
+                    const isActive = prop.id === activePropertyId;
+                    const propGuests = guests.filter(g => g.propertyId === prop.id);
+
+                    return (
+                      <div
+                        key={prop.id}
+                        className={`rounded-2xl p-4 space-y-3 transition-all border ${
+                          isActive
+                            ? 'bg-slate-900/95 border-blue-500/60 ring-1 ring-blue-500/20 shadow-md shadow-blue-500/10'
+                            : 'bg-slate-900/70 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h3 className="font-bold text-white text-sm tracking-wide truncate">
+                                {prop.name}
+                              </h3>
+                              {isActive ? (
+                                <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/40 px-2 py-0.5 rounded-lg shrink-0">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Výchozí
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setActivePropertyId(prop.id);
+                                    persistLocalState(properties, guests, prop.id);
+                                    showToast(`Aktivní zařízení nastaveno na: ${prop.name}`, 'info');
+                                  }}
+                                  className="text-[10px] font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-750 border border-slate-700 px-2 py-0.5 rounded-lg tap-active shrink-0 cursor-pointer"
+                                >
+                                  Aktivovat
+                                </button>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-400 mt-0.5 truncate">
+                              {prop.address || 'Praha'}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={() => openEditPropertyModal(prop)}
+                              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 tap-active"
+                              title="Upravit ubytování"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteProperty(prop.id)}
+                              className="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-slate-800 tap-active"
+                              title="Smazat ubytování"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Codes & Details */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-[11px]">
+                          <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans">Kód IDUB:</span>
+                            <span className={`font-bold tracking-wider mt-0.5 block truncate ${prop.idub ? 'text-emerald-400' : 'text-amber-400'}`}>
+                              {prop.idub || 'Chybí IDUB!'}
+                            </span>
+                          </div>
+                          <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans">Zkratka (5 znaků):</span>
+                            <span className={`font-bold tracking-wider mt-0.5 block truncate ${prop.facilityCode ? 'text-blue-400' : 'text-amber-400'}`}>
+                              {prop.facilityCode || 'Chybí kód!'}
+                            </span>
+                          </div>
+                          <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans">Hostitel:</span>
+                            <span className="text-slate-300 block truncate font-sans">
+                              {prop.hostName || 'Neuveden'}
+                            </span>
+                          </div>
+                          <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans">Přiřazeno hostů:</span>
+                            <span className="text-emerald-400 font-bold block">
+                              {propGuests.length} hostů
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Bottom Action: Zobrazit v knize */}
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 text-xs">
+                          <span className="text-[11px] text-slate-500 font-mono">
+                            VS: {prop.variableSymbol || '–'}
+                          </span>
+                          <button
+                            onClick={() => {
+                              setActivePropertyId(prop.id);
+                              persistLocalState(properties, guests, prop.id);
+                              setActiveTab('ledger');
+                            }}
+                            className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 font-semibold tap-active"
+                          >
+                            <BookOpen className="w-3.5 h-3.5" />
+                            <span>Zobrazit knihu hostů</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* TAB 3: EXPORT UNL (REPLACES ODVOD QR) */}
         {activeTab === 'export' && (
           <div className="space-y-4">
@@ -1759,7 +2156,7 @@ export default function App() {
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400">
-                    UbyPort 2.0 • Policie ČR
+                    UbyPort 2.0 • Evidence cizinců
                   </span>
                   <h2 className="text-base font-bold text-white">Export UNL souboru</h2>
                 </div>
@@ -1787,7 +2184,7 @@ export default function App() {
 
                   <div className="grid grid-cols-2 gap-2 font-mono">
                     <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block font-sans">IDUB (Policie ČR):</span>
+                      <span className="text-[10px] text-slate-400 uppercase block font-sans">IDUB ubytovacího zařízení:</span>
                       <p className={`text-xs font-bold tracking-wider mt-0.5 ${activeProperty.idub ? 'text-emerald-400' : 'text-amber-400'}`}>
                         {activeProperty.idub || 'CHYBÍ IDUB!'}
                       </p>
@@ -1847,7 +2244,7 @@ export default function App() {
                   disabled={!activeUnlResult.content || activeUnlResult.includedCount === 0}
                   className="py-3 px-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active shadow-lg shadow-blue-600/30 cursor-pointer"
                 >
-                  <Download className="w-4 h-4" />
+                  <FileDown className="w-4 h-4" />
                   <span>Stáhnout .UNL</span>
                 </button>
 
@@ -1864,7 +2261,7 @@ export default function App() {
 
               {/* UBYPORT PORTAL LINK */}
               <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs">
-                <span className="text-slate-400">Oficiální web UbyPort Policie ČR:</span>
+                <span className="text-slate-400">Oficiální portál UbyPort:</span>
                 <a
                   href="https://ubyport.policie.cz/"
                   target="_blank"
@@ -1884,7 +2281,7 @@ export default function App() {
           <div className="rounded-3xl bg-slate-900 border border-slate-800 p-5 space-y-4 shadow-xl">
             <div className="flex items-center gap-2 text-blue-400">
               <ShieldCheck className="w-5 h-5" />
-              <h2 className="text-base font-bold text-white">UbyPort 2.0 • Pravidla cizinecké policie</h2>
+              <h2 className="text-base font-bold text-white">UbyPort 2.0 • Pravidla evidence a UNL</h2>
             </div>
 
             <div className="space-y-2 border-b border-slate-800 pb-3">
@@ -1920,7 +2317,7 @@ export default function App() {
                 Kódy ubytovacího zařízení (IDUB & Zkratka)
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Při registraci u Policie ČR obdržíte <strong>IDUB</strong> (identifikační číslo ubytovatele) a <strong>5místnou zkratku zařízení</strong> (např. <code>HOTEL</code> nebo <code>APART</code>). Tyto údaje nastavíte v profilu ubytování v aplikaci a budou automaticky vkládány do každého řádku UNL.
+                Při registraci ubytovatele obdržíte <strong>IDUB</strong> (identifikační číslo ubytovatele) a <strong>5místnou zkratku zařízení</strong> (např. <code>HOTEL</code> nebo <code>APART</code>). Tyto údaje nastavíte v profilu ubytování v aplikaci a budou automaticky vkládány do každého řádku UNL.
               </p>
             </div>
 
@@ -1939,8 +2336,8 @@ export default function App() {
       </main>
 
       {/* BOTTOM NAVIGATION TAB BAR */}
-      <nav className="fixed bottom-0 inset-x-0 bg-[#0D131F] border-t border-slate-800 px-3 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] z-40 shadow-lg select-none">
-        <div className="max-w-2xl mx-auto grid grid-cols-4 gap-1">
+      <nav className="fixed bottom-0 inset-x-0 bg-[#0D131F] border-t border-slate-800 px-2 sm:px-3 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] z-40 shadow-lg select-none">
+        <div className="max-w-2xl mx-auto grid grid-cols-5 gap-1">
           <button
             onClick={() => setActiveTab('scan')}
             className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer ${
@@ -1960,8 +2357,23 @@ export default function App() {
             <BookOpen className="w-5 h-5" />
             <span className="text-[10px] mt-1">Kniha</span>
             {activeGuests.length > 0 && (
-              <span className="absolute top-0 right-5 w-4 h-4 rounded-full bg-blue-500 text-[9px] font-bold text-white flex items-center justify-center">
+              <span className="absolute top-0 right-3 sm:right-5 w-4 h-4 rounded-full bg-blue-500 text-[9px] font-bold text-white flex items-center justify-center">
                 {activeGuests.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('properties')}
+            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer relative ${
+              activeTab === 'properties' ? 'text-blue-500 font-bold' : 'text-slate-400'
+            }`}
+          >
+            <Building className="w-5 h-5" />
+            <span className="text-[10px] mt-1">Ubytování</span>
+            {properties.length > 0 && (
+              <span className="absolute top-0 right-3 sm:right-5 w-4 h-4 rounded-full bg-slate-700 text-[9px] font-bold text-slate-200 flex items-center justify-center">
+                {properties.length}
               </span>
             )}
           </button>
@@ -2081,7 +2493,7 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-slate-400 font-semibold mb-1">
-                      IDUB (kód Policie ČR) *
+                      IDUB (kód zařízení) *
                     </label>
                     <input
                       type="text"
@@ -2480,47 +2892,122 @@ export default function App() {
             </div>
 
             {/* Accommodation assignment choice */}
-            <div className="space-y-2">
-              <label className="block text-xs font-bold text-slate-300">Přiřadit k ubytovacímu zařízení:</label>
-              {properties.length > 0 && (
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setScanTargetChoice('existing')}
-                    className={`py-2 px-3 rounded-xl border text-left font-semibold ${
-                      scanTargetChoice === 'existing'
-                        ? 'bg-blue-950/60 border-blue-500 text-white'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Existující zařízení
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setScanTargetChoice('new')}
-                    className={`py-2 px-3 rounded-xl border text-left font-semibold ${
-                      scanTargetChoice === 'new'
-                        ? 'bg-blue-950/60 border-blue-500 text-white'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Vytvořit nové z lístku
-                  </button>
+            <div className="space-y-3">
+              {detectedPropMatch ? (
+                <div className="p-3.5 rounded-2xl bg-gradient-to-br from-blue-950/70 to-slate-900 border border-blue-500/40 space-y-2.5">
+                  <div className="flex items-center gap-2 text-blue-300 font-bold text-xs">
+                    <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />
+                    <span>Nalezena shoda s existujícím ubytováním!</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-snug">
+                    Vytěžený lístek se shoduje v polích:{' '}
+                    <span className="font-semibold text-blue-300">
+                      {detectedPropMatch.matchReasons.join(', ')}
+                    </span>
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScanTargetChoice('existing');
+                        setSelectedScanPropId(detectedPropMatch.property.id);
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                        scanTargetChoice === 'existing' && selectedScanPropId === detectedPropMatch.property.id
+                          ? 'bg-blue-600/30 border-blue-400 text-white shadow-md shadow-blue-500/10 ring-1 ring-blue-500/30'
+                          : 'bg-slate-950/80 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between font-bold text-white text-xs">
+                        <span>Přiřadit k existujícímu</span>
+                        {scanTargetChoice === 'existing' && selectedScanPropId === detectedPropMatch.property.id && (
+                          <Check className="w-4 h-4 text-blue-400 shrink-0" />
+                        )}
+                      </div>
+                      <div className="font-bold text-blue-300 mt-1 truncate">
+                        {detectedPropMatch.property.name}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
+                        IDUB: {detectedPropMatch.property.idub || 'neuveden'} • {detectedPropMatch.property.facilityCode || ''}
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setScanTargetChoice('new')}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                        scanTargetChoice === 'new'
+                          ? 'bg-blue-600/30 border-blue-400 text-white shadow-md shadow-blue-500/10 ring-1 ring-blue-500/30'
+                          : 'bg-slate-950/80 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between font-bold text-white text-xs">
+                        <span>Založit nové zařízení</span>
+                        {scanTargetChoice === 'new' && (
+                          <Check className="w-4 h-4 text-blue-400 shrink-0" />
+                        )}
+                      </div>
+                      <div className="font-bold text-slate-200 mt-1 truncate">
+                        {scanNewPropForm.name || 'Z vytěžených dat'}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                        Vytvoří nový profil ubytování
+                      </div>
+                    </button>
+                  </div>
                 </div>
+              ) : (
+                <>
+                  <label className="block text-xs font-bold text-slate-300">Přiřadit k ubytovacímu zařízení:</label>
+                  {properties.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setScanTargetChoice('existing')}
+                        className={`py-2 px-3 rounded-xl border text-left font-semibold ${
+                          scanTargetChoice === 'existing'
+                            ? 'bg-blue-950/60 border-blue-500 text-white'
+                            : 'bg-slate-950 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        Existující zařízení
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setScanTargetChoice('new')}
+                        className={`py-2 px-3 rounded-xl border text-left font-semibold ${
+                          scanTargetChoice === 'new'
+                            ? 'bg-blue-950/60 border-blue-500 text-white'
+                            : 'bg-slate-950 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        Vytvořit nové z lístku
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
 
               {scanTargetChoice === 'existing' && properties.length > 0 ? (
-                <select
-                  value={selectedScanPropId}
-                  onChange={e => setSelectedScanPropId(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                >
-                  {properties.map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} (IDUB: {p.idub || 'neuveden'}, Kód: {p.facilityCode || 'neuveden'})
-                    </option>
-                  ))}
-                </select>
+                <div className="space-y-1">
+                  {detectedPropMatch && (
+                    <label className="text-[10px] text-slate-400 font-semibold block">
+                      Vybrané cílové ubytovací zařízení:
+                    </label>
+                  )}
+                  <select
+                    value={selectedScanPropId}
+                    onChange={e => setSelectedScanPropId(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                  >
+                    {properties.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} (IDUB: {p.idub || 'neuveden'}, Kód: {p.facilityCode || 'neuveden'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               ) : (
                 <div className="space-y-2 bg-slate-950 p-3 rounded-2xl border border-slate-800 text-xs">
                   <div>
@@ -2534,7 +3021,7 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-[10px] text-slate-400 uppercase font-semibold">IDUB (Policie ČR):</label>
+                      <label className="text-[10px] text-slate-400 uppercase font-semibold">IDUB ubytovacího zařízení:</label>
                       <input
                         type="text"
                         value={scanNewPropForm.idub}
@@ -2583,7 +3070,7 @@ export default function App() {
                       </div>
                       {isCzech && (
                         <p className="text-[10px] text-amber-400">
-                          Občan ČR – nebude exportován do UNL cizinecké policie.
+                          Občan ČR – nepodléhá hlášení do UNL.
                         </p>
                       )}
                     </div>
@@ -2825,39 +3312,96 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
                 <h3 className="font-bold text-white text-base">Výběr modelu Gemini OCR</h3>
-                <p className="text-[11px] text-slate-400">Vyberte model pro rozpoznávání ubytovacích formulářů</p>
+                <p className="text-[11px] text-slate-400">Seznam dostupných modelů vrácených z Google API</p>
               </div>
-              <button onClick={() => setIsModelSelectorOpen(false)} className="text-slate-400 hover:text-white p-1">
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => refreshModelsList()}
+                  disabled={isLoadingModels}
+                  className="p-1.5 text-slate-400 hover:text-blue-400 rounded-lg hover:bg-slate-800 tap-active disabled:opacity-50"
+                  title="Znovu načíst modely z Google API"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoadingModels ? 'animate-spin text-blue-400' : ''}`} />
+                </button>
+                <button onClick={() => setIsModelSelectorOpen(false)} className="text-slate-400 hover:text-white p-1">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            <div className="space-y-2">
-              {availableModels.map(m => (
-                <div
-                  key={m.name}
-                  onClick={() => selectModel(m.name)}
-                  className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between ${
-                    m.name === activeModelName
-                      ? 'bg-blue-950/50 border-blue-500 text-white'
-                      : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm text-white">{m.displayName || m.name}</span>
-                      {m.isRecommended && (
-                        <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/20 text-emerald-400">
-                          Doporučeno
-                        </span>
-                      )}
-                    </div>
-                    {m.description && <p className="text-[11px] text-slate-400 leading-snug">{m.description}</p>}
-                  </div>
-                  {m.name === activeModelName && <Check className="w-5 h-5 text-blue-400 shrink-0 ml-2" />}
-                </div>
-              ))}
+            {/* SEARCH MODELS */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={modelSearchQuery}
+                onChange={e => setModelSearchQuery(e.target.value)}
+                placeholder="Filtrovat modely (např. flash, pro)..."
+                className="w-full bg-slate-950 border border-slate-800 text-white rounded-xl pl-9 pr-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+              />
             </div>
+
+            {/* LOADING / ERROR STATES */}
+            {isLoadingModels && (
+              <div className="py-6 text-center space-y-2">
+                <Loader2 className="w-6 h-6 text-blue-400 animate-spin mx-auto" />
+                <p className="text-xs text-slate-400">Dotazuji Google API na dostupné modely...</p>
+              </div>
+            )}
+
+            {modelsError && !isLoadingModels && (
+              <div className="p-3 rounded-2xl bg-amber-950/40 border border-amber-600/40 text-amber-200 text-xs flex items-center justify-between">
+                <span>{modelsError}</span>
+                <button
+                  onClick={() => refreshModelsList()}
+                  className="px-2 py-1 bg-amber-600 text-white rounded-lg font-bold tap-active text-[11px] shrink-0 ml-2"
+                >
+                  Zkusit znovu
+                </button>
+              </div>
+            )}
+
+            {/* MODELS LIST */}
+            {!isLoadingModels && (
+              <div className="space-y-2 max-h-72 overflow-y-auto no-scrollbar">
+                {availableModels
+                  .filter(m => {
+                    if (!modelSearchQuery.trim()) return true;
+                    const q = modelSearchQuery.toLowerCase();
+                    return (
+                      m.name.toLowerCase().includes(q) ||
+                      (m.displayName || '').toLowerCase().includes(q) ||
+                      (m.description || '').toLowerCase().includes(q)
+                    );
+                  })
+                  .map(m => (
+                    <div
+                      key={m.name}
+                      onClick={() => selectModel(m.name)}
+                      className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between ${
+                        m.name === activeModelName
+                          ? 'bg-blue-950/50 border-blue-500 text-white ring-1 ring-blue-500/30'
+                          : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="space-y-0.5 min-w-0 pr-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-xs text-white truncate">{m.displayName || m.name}</span>
+                          {m.isRecommended && (
+                            <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/20 text-emerald-400 shrink-0">
+                              Doporučeno
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-400 font-mono truncate">{m.name}</p>
+                        {m.description && <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">{m.description}</p>}
+                      </div>
+                      {m.name === activeModelName && <Check className="w-5 h-5 text-blue-400 shrink-0" />}
+                    </div>
+                  ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2870,9 +3414,9 @@ export default function App() {
               <KeyRound className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="font-bold text-white text-base">Zadejte Gemini API klíč</h3>
+              <h3 className="font-bold text-white text-base">Zadejte Google Gemini API klíč</h3>
               <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                Na statickém hostingu GitHub Pages probíhá rozpoznávání lístků přímo ve vašem prohlížeči pomocí Google Gemini API. Zadejte svůj bezplatný klíč:
+                Na hostingu GitHub Pages probíhá rozpoznávání lístků přímo ve vašem prohlížeči pomocí Google Gemini API. Zadejte svůj bezplatný klíč:
               </p>
             </div>
 
@@ -2914,6 +3458,8 @@ export default function App() {
                     return;
                   }
                   safeStorage.setItem('ubyport_user_api_key', userApiKey.trim());
+                  safeStorage.setItem('airtax_secure_key_blob', userApiKey.trim());
+                  refreshModelsList(userApiKey.trim());
                   setIsMissingKeyModalOpen(false);
                   showToast('API klíč byl uložen!', 'success');
                   if (imagePreview) {
@@ -2922,7 +3468,7 @@ export default function App() {
                 }}
                 className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer shadow-lg shadow-blue-600/30"
               >
-                Uložit a skenovat
+                Uložit klíč
               </button>
             </div>
           </div>

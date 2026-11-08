@@ -1,75 +1,70 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { normalizeCountryCode, parseAddressParts } from './ubyport';
+import { normalizeCountryCode, parseAddressParts, cleanAsciiUpper } from './ubyport';
 
-const CANDIDATE_FLASH_MODELS = [
+export const CANDIDATE_FLASH_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
   'gemini-flash-latest',
-  'gemini-3.8-flash',
-  'gemini-3.1-flash-lite'
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-2.5-pro'
 ];
 
-const OCR_PROMPT = `
+export const OCR_PROMPT = `
 Jsi špičkový OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes UbyPort 2.0.
+Formulář může být orientován libovolně: svisle, vodorovně, i otočený o 90°, 180° nebo 270°.
 
-Struktura formuláře (může být orientován svisle nebo vodorovně):
-1. HLAVIČKA A IDENTIFIKACE ZAŘÍZENÍ:
-   - Check-in (Příjezd) - např. Oct 1, 2026 -> převeď na ISO YYYY-MM-DD (2026-10-01).
-   - Check-out (Odjezd) - např. Oct 8, 2026 -> převeď na ISO YYYY-MM-DD (2026-10-08).
-   - Počet nocí (nights) - např. 7 nights -> číslo 7.
-   - Označení jednotky / pokoje (unit) - např. Unit E302 nebo 102.
-   - Název rezidence / ubytování (např. Karolina Plazza - Karlín).
-   - Adresa ubytování (např. Sokolovská 694/102, 186 00 Praha 8).
-   - IDUB ubytovacího zařízení (např. CZ1234567890, pokud je uvedeno).
-   - Zkratka zařízení (např. HOTEL, APART, max 5 znaků, pokud je uvedeno).
-   - Ubytovatel / Hostitel (např. Bc. Michaela Heidenreichová).
+Struktura formuláře:
+1. HLAVIČKA POBYTU A ZAŘÍZENÍ:
+   - Check-in: převeď na ISO datum YYYY-MM-DD (např. 'OCT 1, 2026' -> '2026-10-01').
+   - Check-out: převeď na ISO datum YYYY-MM-DD (např. 'OCT 8, 2026' -> '2026-10-08').
+   - Počet nocí (nights): celé číslo z pole 'nights' (např. '7 nights' -> 7).
+   - Označení jednotky / pokoje (detectedUnit): např. 'Unit E302' nebo '102'.
+   - Název rezidence / ubytování (detectedPropertyName): např. 'Karolina Plazza - Karlín'.
+   - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8'.
+   - IDUB ubytovacího zařízení (detectedIDUB): pokud je uvedeno (např. CZ1234567890).
+   - Zkratka zařízení (detectedFacilityCode): max 5 znaků (např. HOTEL, APART).
+   - Ubytovatel / Hostitel (detectedHostName): např. 'Bc. Michaela Heidenreichová'.
+   - IČO / Variabilní symbol (detectedVS): např. '17974305'.
 
 2. TABULKA UBYTOVANÝCH OSOB:
-   - Zpracuj pouze skutečně fyzicky vyplněné řádky! Prázdné řádky ignoruj.
-   - Do hodnot polí vkládej POUZE čistá data bez vysvětlivek.
+   - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
+   - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
-     * Příjmení (Last name) - např. Kinkaid
-     * Jméno (First name) - např. Kenneth
-     * Datum narození (Date of birth) - ve formátu ISO YYYY-MM-DD (např. 01.10.1971 -> 1971-10-01)
-     * Státní občanství / státní příslušnost (Citizenship) - 3místný ISO kód (např. USA, DEU, GBR, SVK, POL, ITA, FRA)
-     * Stát trvalého bydliště - 3místný ISO kód (obvykle shodný s občanstvím, pokud není uveden jiný stát)
-     * Obec trvalého bydliště (City) - např. Littleton
-     * Ulice a číslo domu bydliště (Street and house number) - např. 6917 S Queen St
-     * Celá adresa bydliště (Home Address)
-     * Druh dokladu - PAS (cestovní pas) nebo OP (občanský průkaz / ID card)
-     * Číslo cestovního dokladu (Passport / ID No) - např. A50465791
-     * Stát vydání dokladu - 3místný ISO kód (obvykle stát občanství)
-     * Číslo víza (Visa No) - pokud je uvedeno, jinak ""
-     * Účel pobytu - číselný kód dle číselníku cizinecké policie:
-       1 = turistika / rekreace (např. leisure, holiday, tourism)
-       2 = zaměstnání / práce
-       3 = studium
-       4 = obchod / služební cesta (business)
-       5 = léčení
-       6 = ostatní
-
-DŮLEŽITÉ: Každou osobu zahrň do pole 'guests' pouze JEDNOU. Všechny osoby na jednom lístku sdílejí Check-in, Check-out a počet nocí z hlavičky lístku.
+     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY bez diakritiky (např. KINKAID).
+     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY bez diakritiky (např. KENNETH).
+     * birthDate: Datum narození ze sloupce 'datum narození / Date of birth' ve formátu ISO YYYY-MM-DD (např. '01.10.1971' -> '1971-10-01').
+     * nationality: Státní příslušnost / občanství ze sloupce 'státní občanství / Citizenship'.
+       KRITICKÉ: VŽDY převeď na 3místný ISO 3166-1 alpha-3 kód.
+       Pokud je napsáno 'USA', 'US' nebo 'United States', MUSÍ BÝT 'USA'! NIKDY nenastavuj 'DEU'!
+       Pokud je 'DE' nebo 'Germany', 'DEU'.
+       Pokud je 'GB' nebo 'UK', 'GBR'.
+       Pokud je 'CZ' nebo 'Česká', 'CZE'.
+       Pokud je 'SK' nebo 'Slovensko', 'SVK'.
+     * passportNumber: Číslo cestovního pasu nebo OP ze sloupce 'č. cestovního dokladu / Passport No'.
+       KRITICKÉ: Pokud je ve sloupci cokoliv zapsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
+     * documentType: 'OP' pro občanský průkaz (ID card), 'PAS' pro cestovní pas. Pokud není zřejmé, použij 'PAS'.
+     * homeAddress: Celá adresa ze sloupce 'trvalé bydliště v zahraničí / Home Address' (např. '6917 S Queen St, Littleton Co').
+     * city: Město trvalého bydliště z adresy (např. 'Littleton').
+     * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
+     * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
+     * purposeOfStay: Číslo účelu pobytu dle zaškrtnutého checkboxu (1 = turistika / leisure, 2 = zaměstnání / práce, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní).
 `;
 
 export async function runClientGeminiOcr(
   imageBase64: string,
   apiKey: string,
   preferredModel?: string,
-  mimeType: string = 'image/jpeg'
+  mimeType: string = 'image/jpeg',
+  signal?: AbortSignal
 ): Promise<{ data: any; modelUsed: string }> {
-  if (!apiKey || !apiKey.trim()) {
+  const cleanKey = (apiKey || '').trim();
+  if (!cleanKey) {
     throw new Error('Chybí Gemini API klíč. Zadejte klíč v Nastavení nebo se připojte ke svému Google Sešitu.');
   }
 
-  const ai = new GoogleGenAI({
-    apiKey: apiKey.trim(),
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build'
-      }
-    }
-  });
-
   const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '');
 
+  // Sestavení prioritní fronty modelů
   const modelQueue: string[] = [];
   if (preferredModel && preferredModel !== 'auto') {
     modelQueue.push(preferredModel);
@@ -78,81 +73,144 @@ export async function runClientGeminiOcr(
     if (!modelQueue.includes(m)) modelQueue.push(m);
   });
 
+  const payload = {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: OCR_PROMPT },
+          {
+            inlineData: {
+              mimeType: mimeType || 'image/jpeg',
+              data: cleanBase64
+            }
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          detectedPropertyName: { type: 'STRING' },
+          detectedAddress: { type: 'STRING' },
+          detectedIDUB: { type: 'STRING' },
+          detectedFacilityCode: { type: 'STRING' },
+          detectedDistrictKey: { type: 'STRING' },
+          detectedHostName: { type: 'STRING' },
+          detectedVS: { type: 'STRING' },
+          detectedUnit: { type: 'STRING' },
+          dateArrival: { type: 'STRING' },
+          dateDeparture: { type: 'STRING' },
+          nights: { type: 'INTEGER' },
+          guests: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                lastName: { type: 'STRING' },
+                firstName: { type: 'STRING' },
+                birthDate: { type: 'STRING' },
+                nationality: { type: 'STRING' },
+                residenceCountry: { type: 'STRING' },
+                passportNumber: { type: 'STRING' },
+                documentType: { type: 'STRING' },
+                documentIssuerCountry: { type: 'STRING' },
+                homeAddress: { type: 'STRING' },
+                city: { type: 'STRING' },
+                street: { type: 'STRING' },
+                visaNumber: { type: 'STRING' },
+                purposeOfStay: { type: 'STRING' }
+              },
+              required: ['lastName', 'firstName']
+            }
+          }
+        },
+        required: ['dateArrival', 'dateDeparture', 'nights', 'guests']
+      }
+    }
+  };
+
   let lastError: any = null;
   let extractedData: any = null;
   let usedModel = '';
 
   for (const candidate of modelQueue) {
+    if (signal?.aborted) {
+      throw new Error('Skenování bylo zrušeno uživatelem.');
+    }
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(candidate)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+
+    // Per-request timeout 18 sekund
+    const timeoutController = new AbortController();
+    const timerId = setTimeout(() => timeoutController.abort(), 18000);
+
+    const onCallerAbort = () => {
+      timeoutController.abort();
+    };
+    if (signal) {
+      signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+
     try {
-      const response = await ai.models.generateContent({
-        model: candidate,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: OCR_PROMPT },
-              {
-                inlineData: {
-                  mimeType,
-                  data: cleanBase64
-                }
-              }
-            ]
-          }
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              detectedPropertyName: { type: Type.STRING },
-              detectedAddress: { type: Type.STRING },
-              detectedIDUB: { type: Type.STRING },
-              detectedFacilityCode: { type: Type.STRING },
-              detectedDistrictKey: { type: Type.STRING },
-              detectedHostName: { type: Type.STRING },
-              detectedVS: { type: Type.STRING },
-              detectedUnit: { type: Type.STRING },
-              dateArrival: { type: Type.STRING },
-              dateDeparture: { type: Type.STRING },
-              nights: { type: Type.INTEGER },
-              guests: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    lastName: { type: Type.STRING },
-                    firstName: { type: Type.STRING },
-                    birthDate: { type: Type.STRING },
-                    nationality: { type: Type.STRING },
-                    residenceCountry: { type: Type.STRING },
-                    city: { type: Type.STRING },
-                    street: { type: Type.STRING },
-                    homeAddress: { type: Type.STRING },
-                    documentType: { type: Type.STRING },
-                    passportNumber: { type: Type.STRING },
-                    documentIssuerCountry: { type: Type.STRING },
-                    visaNumber: { type: Type.STRING },
-                    purposeOfStay: { type: Type.STRING }
-                  },
-                  required: ['lastName', 'firstName']
-                }
-              }
-            },
-            required: ['dateArrival', 'dateDeparture', 'nights', 'guests']
-          }
-        }
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: timeoutController.signal
       });
 
-      const rawText = response.text;
-      if (rawText) {
-        extractedData = JSON.parse(rawText);
-        usedModel = candidate;
-        break;
+      clearTimeout(timerId);
+      if (signal) {
+        signal.removeEventListener('abort', onCallerAbort);
       }
-    } catch (err: any) {
-      console.warn(`Client OCR model ${candidate} failed:`, err);
-      lastError = err;
+
+      if (response.ok) {
+        const result = await response.json();
+        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (jsonText) {
+          extractedData = JSON.parse(jsonText);
+          usedModel = candidate;
+          try {
+            localStorage.setItem('ubyport_working_model', candidate);
+            localStorage.setItem('airtax_working_model', candidate);
+          } catch {
+            // safe storage
+          }
+          break;
+        }
+      }
+
+      const errData = await response.json().catch(() => ({}));
+      const errMsg = errData.error?.message || `HTTP ${response.status}`;
+
+      // Pokud model není dostupný (404), zkusíme plynule další
+      if (response.status === 404 || errMsg.includes('not found') || errMsg.includes('not supported')) {
+        console.warn(`Model ${candidate} není pro váš klíč dostupný, zkouším další...`);
+        lastError = new Error(errMsg);
+        continue;
+      }
+
+      // Neplatný klíč
+      if (response.status === 400 || response.status === 403) {
+        throw new Error(`Neplatný API klíč: ${errMsg}`);
+      }
+
+      lastError = new Error(`Chyba modelu ${candidate}: ${errMsg}`);
+    } catch (callErr: any) {
+      clearTimeout(timerId);
+      if (signal) {
+        signal.removeEventListener('abort', onCallerAbort);
+      }
+      if (signal?.aborted) {
+        throw new Error('Skenování bylo zrušeno uživatelem.');
+      }
+      console.warn(`Model ${candidate} selhal:`, callErr.message || callErr);
+      lastError = callErr;
     }
   }
 
@@ -163,22 +221,40 @@ export async function runClientGeminiOcr(
   // Normalizace dat hostů
   if (Array.isArray(extractedData.guests)) {
     extractedData.guests = extractedData.guests.map((g: any) => {
-      const nat = normalizeCountryCode(g.nationality);
-      const resC = normalizeCountryCode(g.residenceCountry || g.nationality);
-      const issC = normalizeCountryCode(g.documentIssuerCountry || g.nationality);
-      let { city = '', street = '' } = g;
-      if (!city && g.homeAddress) {
-        const parsed = parseAddressParts(g.homeAddress);
-        city = parsed.city;
-        street = parsed.street;
+      // 1. Občanství: priorita USA a přesná detekce
+      const rawNat = String(g.nationality || '').trim();
+      let nat = normalizeCountryCode(rawNat);
+      if (/USA|AMERICA|UNITED STATES|^US$/i.test(rawNat)) {
+        nat = 'USA';
       }
+
+      // 2. Stát trvalého bydliště a vydání dokladu: defaultně stát občanství (žádné 'DEU'!)
+      const resC = normalizeCountryCode(g.residenceCountry) || nat;
+      const issC = normalizeCountryCode(g.documentIssuerCountry) || nat;
+
+      // 3. Adresa
+      let city = g.city || '';
+      let street = g.street || '';
+      if ((!city || !street) && g.homeAddress) {
+        const parsed = parseAddressParts(g.homeAddress);
+        if (!city) city = parsed.city;
+        if (!street) street = parsed.street;
+      }
+
+      // 4. Číslo pasu / dokladu
+      const passNum = String(g.passportNumber || g.idDocumentNumber || '').replace(/\s/g, '');
+
       return {
         ...g,
+        lastName: cleanAsciiUpper(g.lastName),
+        firstName: cleanAsciiUpper(g.firstName),
         nationality: nat,
         residenceCountry: resC,
         documentIssuerCountry: issC,
-        city: city || g.city || '',
-        street: street || g.street || '',
+        passportNumber: passNum,
+        idDocumentNumber: passNum,
+        city: cleanAsciiUpper(city),
+        street: cleanAsciiUpper(street),
         documentType: /ID|OP|CARD/i.test(g.documentType || '') ? 'OP' : 'PAS'
       };
     });
@@ -217,27 +293,21 @@ export const CURATED_OCR_MODELS: GeminiModelInfo[] = [
     isRecommended: true
   },
   {
-    name: 'gemini-2.5-pro',
-    displayName: 'Gemini 2.5 Pro',
-    description: 'Maximální analytická přesnost pro obtížně čitelné a ručně psané lístky.',
-    isRecommended: false
-  },
-  {
     name: 'gemini-1.5-flash',
     displayName: 'Gemini 1.5 Flash',
     description: 'Osvědčený lehký model s dlouhým kontextem.',
     isRecommended: false
   },
   {
-    name: 'gemini-1.5-pro',
-    displayName: 'Gemini 1.5 Pro',
-    description: 'Pokročilý multimodální model pro komplexní úlohy.',
+    name: 'gemini-2.5-pro',
+    displayName: 'Gemini 2.5 Pro',
+    description: 'Maximální analytická přesnost pro obtížně čitelné a ručně psané lístky.',
     isRecommended: false
   }
 ];
 
 export async function fetchAvailableGeminiModels(apiKey: string): Promise<GeminiModelInfo[]> {
-  const cleanKey = apiKey.trim();
+  const cleanKey = (apiKey || '').trim();
   if (!cleanKey) {
     throw new Error('Chybí Gemini API klíč. Zadejte jej prosím v nastavení nebo připojte Google Sheet.');
   }

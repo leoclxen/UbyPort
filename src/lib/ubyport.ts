@@ -115,6 +115,23 @@ export function cleanAsciiUpper(input?: string): string {
  */
 export function normalizeCountryCode(code?: string): string {
   if (!code) return '';
+  const trimmed = String(code).trim();
+  if (/^US$|^USA$|UNITED STATES|AMERICA|AMERIK/i.test(trimmed)) return 'USA';
+  if (/^DE$|^DEU$|GERMAN|DEUTSCH/i.test(trimmed)) return 'DEU';
+  if (/^GB$|^GBR$|^UK$|UNITED KINGDOM|BRITAIN|ENGLAND/i.test(trimmed)) return 'GBR';
+  if (/^CZ$|^CZE$|CZECH|CESK/i.test(trimmed)) return 'CZE';
+  if (/^SK$|^SVK$|SLOVAK/i.test(trimmed)) return 'SVK';
+  if (/^AT$|^AUT$|AUSTRI|RAKOUS/i.test(trimmed)) return 'AUT';
+  if (/^PL$|^POL$|POLAND|POLSK/i.test(trimmed)) return 'POL';
+  if (/^IT$|^ITA$|ITAL/i.test(trimmed)) return 'ITA';
+  if (/^FR$|^FRA$|FRANC/i.test(trimmed)) return 'FRA';
+  if (/^ES$|^ESP$|SPAIN|SPANEL|ESPANA/i.test(trimmed)) return 'ESP';
+  if (/^UA$|^UKR$|UKRAIN/i.test(trimmed)) return 'UKR';
+  if (/^NL$|^NLD$|NETHERLAND|HOLLAND|NIZOZEM/i.test(trimmed)) return 'NLD';
+  if (/^CH$|^CHE$|SWISS|SWITZERLAND|SVYCAR/i.test(trimmed)) return 'CHE';
+  if (/^CA$|^CAN$|CANADA|KANAD/i.test(trimmed)) return 'CAN';
+  if (/^AU$|^AUS$|AUSTRAL/i.test(trimmed)) return 'AUS';
+
   const clean = cleanAsciiUpper(code).replace(/[^A-Z]/g, '');
   if (clean.length === 2 && ISO2_TO_ISO3[clean]) {
     return ISO2_TO_ISO3[clean];
@@ -122,18 +139,6 @@ export function normalizeCountryCode(code?: string): string {
   if (clean.length === 3) {
     return clean;
   }
-  // Fallback mapování známých názvů
-  if (/GERMANY|DEUTSCHLAND/i.test(code)) return 'DEU';
-  if (/UNITED STATES|AMERICA|USA/i.test(code)) return 'USA';
-  if (/UNITED KINGDOM|BRITAIN|ENGLAND/i.test(code)) return 'GBR';
-  if (/CZECH/i.test(code)) return 'CZE';
-  if (/SLOVAK/i.test(code)) return 'SVK';
-  if (/AUSTRI/i.test(code)) return 'AUT';
-  if (/POL/i.test(code)) return 'POL';
-  if (/ITAL/i.test(code)) return 'ITA';
-  if (/FRAN/i.test(code)) return 'FRA';
-  if (/SPAIN|ESPANA/i.test(code)) return 'ESP';
-  if (/UKRAIN/i.test(code)) return 'UKR';
   return clean.substring(0, 3);
 }
 
@@ -348,7 +353,7 @@ export function generateUnlRow(guest: Guest, property: Property): string {
   const lastName = cleanAsciiUpper(guest.lastName || '');
   const firstName = cleanAsciiUpper(guest.firstName || '');
   const birthDate = formatDateDDMMYYYY(guest.birthDate);
-  const nationality = normalizeCountryCode(guest.nationality || 'DEU');
+  const nationality = normalizeCountryCode(guest.nationality) || '';
   const residenceCountry = normalizeCountryCode(guest.residenceCountry || guest.nationality || nationality);
 
   // Zpracování adresy
