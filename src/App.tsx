@@ -477,9 +477,14 @@ export default function App() {
 
   // Google Login / Logout
   const handleGoogleLogin = async () => {
+    if (!userApiKey || !userApiKey.trim()) {
+      setIsMissingKeyModalOpen(true);
+      showToast('Pro přihlášení ke Google účtu zadejte svůj Google API klíč.', 'info');
+      return;
+    }
     try {
       setIsGoogleLoading(true);
-      const res = await googleSignIn();
+      const res = await googleSignIn(userApiKey.trim());
       if (!res) return;
       setCurrentUser(res.user);
       setGoogleToken(res.accessToken);
@@ -3210,7 +3215,7 @@ export default function App() {
                     type="password"
                     value={userApiKey}
                     onChange={e => setUserApiKey(e.target.value)}
-                    placeholder="AIzaSy..."
+                    placeholder="Zadejte váš API klíč..."
                     className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl pl-9 pr-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none font-mono"
                   />
                 </div>
@@ -3426,7 +3431,7 @@ export default function App() {
                 type="password"
                 value={userApiKey}
                 onChange={e => setUserApiKey(e.target.value)}
-                placeholder="AIzaSy..."
+                placeholder="Zadejte váš API klíč..."
                 className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
               />
               <p className="text-[10px] text-slate-500">
