@@ -1,7 +1,7 @@
 meta:
-  version: "3.0"
-  description: "AirTax Praha - Evidence ubytovaných a poplatků z pobytu"
-  lastUpdated: "2026-11-03T21:00:00.000Z"
+  version: "3.1"
+  description: "UbyExport - Evidence ubytovaných cizinců a UNL export pro UbyPort 2.0"
+  lastUpdated: "2026-11-09T12:00:00.000Z"
   activePropertyId: ""
 properties: []
 guests: []

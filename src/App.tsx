@@ -208,7 +208,7 @@ export default function App() {
   const [scanStatus, setScanStatus] = useState<string>('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [activeModelName, setActiveModelName] = useState<string>(
-    safeStorage.getItem('ubyport_model_pref') || safeStorage.getItem('airtax_working_model') || 'gemini-2.5-flash'
+    safeStorage.getItem('ubyport_model_pref') || 'gemini-2.5-flash'
   );
   const [userApiKey, setUserApiKey] = useState<string>(
     safeStorage.getItem('ubyport_user_api_key') ||
@@ -1007,68 +1007,48 @@ export default function App() {
 
     try {
       let resultData: any = null;
-      let lastClientError: any = null;
-
-      // 1. Zkusíme přímé klientské volání přes Google GenAI / Gemini REST API
+      // 1. Zkusíme přímé klientské volání přes Google GenAI / Gemini REST API s klíčem uživatele
       if (hasClientKey) {
-        try {
-          const clientRes = await runClientGeminiOcr(
-            base64Data,
-            userApiKey.trim(),
-            activeModelName,
+        const clientRes = await runClientGeminiOcr(
+          base64Data,
+          userApiKey.trim(),
+          activeModelName,
+          mimeType,
+          abortController.signal
+        );
+        resultData = clientRes.data;
+        setScanStatus(`Úspěšně zpracováno modelem ${clientRes.modelUsed}!`);
+      } else if (isLocalDev && !abortController.signal.aborted) {
+        // 2. Serverové proxy API (POUZE na lokálním vývoji, pokud není zadán klientský klíč)
+        const response = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: base64Data,
             mimeType,
-            abortController.signal
-          );
-          resultData = clientRes.data;
-          setScanStatus(`Úspěšně zpracováno modelem ${clientRes.modelUsed}!`);
-        } catch (clientErr: any) {
-          if (abortController.signal.aborted) {
-            return;
-          }
-          console.warn('Klientské volání OCR selhalo:', clientErr);
-          lastClientError = clientErr;
-        }
-      }
+            preferredModel: activeModelName
+          }),
+          signal: abortController.signal
+        });
 
-      // 2. Fallback na serverové proxy API (POUZE na lokálním vývojovém serveru localhost:3000)
-      if (!resultData && isLocalDev && !abortController.signal.aborted) {
-        try {
-          const response = await fetch('/api/ocr', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              imageBase64: base64Data,
-              mimeType,
-              userApiKey: userApiKey || undefined,
-              preferredModel: activeModelName
-            }),
-            signal: abortController.signal
-          });
-
-          const contentType = response.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            const data = await response.json();
-            if (!response.ok) {
-              if (response.status === 401 || data.error?.includes('API klíč')) {
-                setIsMissingKeyModalOpen(true);
-                throw new Error(data.error || 'Není zadán Gemini API klíč.');
-              }
-              throw new Error(data.error || `Chyba OCR serveru (${response.status})`);
+        const contentType = response.headers.get('content-type') || '';
+        if (!response.ok || !contentType.includes('application/json')) {
+          const rawText = await response.text().catch(() => '');
+          let errMsg = `Chyba OCR serveru (${response.status})`;
+          try {
+            const errJson = JSON.parse(rawText);
+            if (errJson?.error) errMsg = errJson.error;
+          } catch {
+            if (rawText && !rawText.includes('<html')) {
+              errMsg = `${errMsg}: ${rawText.slice(0, 100)}`;
             }
-            resultData = data.data;
-            setScanStatus(`Zpracováno modelem ${data.modelUsed || activeModelName}!`);
-          } else {
-            const errText = await response.text();
-            throw new Error(`Chyba serveru (${response.status}): ${errText.slice(0, 80)}`);
           }
-        } catch (serverErr: any) {
-          if (lastClientError) {
-            throw lastClientError;
-          }
-          throw serverErr;
+          throw new Error(errMsg);
         }
-      } else if (!resultData && lastClientError) {
-        throw lastClientError;
+
+        const data = await response.json();
+        resultData = data.data;
+        setScanStatus(`Zpracováno modelem ${data.modelUsed || activeModelName}!`);
       }
 
       if (abortController.signal.aborted) {
@@ -1341,10 +1321,11 @@ export default function App() {
   };
 
   const selectModel = async (modelName: string) => {
-    setActiveModelName(modelName);
-    safeStorage.setItem('ubyport_model_pref', modelName);
+    const clean = modelName.replace(/^models\//, '').trim();
+    setActiveModelName(clean);
+    safeStorage.setItem('ubyport_model_pref', clean);
     setIsModelSelectorOpen(false);
-    showToast(`Aktivní model OCR nastaven na: ${modelName}`, 'success');
+    showToast(`Aktivní model OCR nastaven na: ${clean}`, 'success');
 
     if (googleToken && connectedSheet) {
       try {

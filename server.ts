@@ -433,8 +433,13 @@ app.post('/api/ocr', async (req, res) => {
     const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '');
 
     const promptInstructions = `
-Jsi špičkový OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes UbyPort 2.0.
-Formulář může být orientován libovolně: svisle, vodorovně, i otočený o 90°, 180° nebo 270°.
+Jsi špičkový multimodální OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes systém UbyPort 2.0.
+
+KRITICKÁ PRAVIDLA PRO ORIENTACI OBRÁZKU A ČTENÍ:
+- Tento formulář ("REGISTRATION FORM") může být vyfotografován pod libovolným úhlem: svisle, vodorovně, otočený o 90° doleva/doprava, o 180° vzhůru nohama nebo zešikma.
+- Před jakýmkoliv čtením textu nejprve vizuálně detekuj orientaci tiskopisu (podle záhlaví 'REGISTRATION FORM', bloků 'Check-in', 'Check-out' nebo sloupců 'Last name', 'First name', 'Date of birth', 'Citizenship', 'Passport No').
+- Otoč si formulář v paměti do správné orientace a čti texty ve správném směru čtení (shora dolů a zleva doprava).
+- Vytěž VŠECHNA pole bez ohledu na to, pod jakým úhlem byl snímek pořízen!
 
 Struktura formuláře:
 1. HLAVIČKA POBYTU A ZAŘÍZENÍ:
@@ -443,7 +448,7 @@ Struktura formuláře:
    - Počet nocí (nights): celé číslo z pole 'nights' (např. '7 nights' -> 7).
    - Označení jednotky / pokoje (detectedUnit): např. 'Unit E302' nebo '102'.
    - Název rezidence / ubytování (detectedPropertyName): např. 'Karolina Plazza - Karlín'.
-   - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8'.
+   - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8' nebo 'Květinková 2570/17, 130 00 Praha 3'.
    - IDUB ubytovacího zařízení (detectedIDUB): pokud je uvedeno (např. CZ1234567890).
    - Zkratka zařízení (detectedFacilityCode): max 5 znaků (např. HOTEL, APART).
    - Ubytovatel / Hostitel (detectedHostName): např. 'Bc. Michaela Heidenreichová'.
@@ -473,13 +478,11 @@ Struktura formuláře:
      * purposeOfStay: Číslo účelu pobytu dle zaškrtnutého checkboxu (1 = turistika / leisure, 2 = zaměstnání / práce, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní).
 `;
 
-    const modelQueue: string[] = [];
-    if (preferredModel && preferredModel !== 'auto') {
-      modelQueue.push(preferredModel);
-    }
-    CANDIDATE_FLASH_MODELS.forEach(m => {
-      if (!modelQueue.includes(m)) modelQueue.push(m);
-    });
+    const targetModel = (preferredModel || '').replace(/^models\//, '').trim();
+    const isAuto = !targetModel || targetModel === 'auto';
+    const modelQueue: string[] = isAuto
+      ? ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-pro']
+      : [targetModel];
 
     let lastError: any = null;
     let extractedData: any = null;
@@ -505,63 +508,31 @@ Struktura formuláře:
             }
           ],
           config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                detectedPropertyName: { type: Type.STRING },
-                detectedAddress: { type: Type.STRING },
-                detectedIDUB: { type: Type.STRING },
-                detectedFacilityCode: { type: Type.STRING },
-                detectedDistrictKey: { type: Type.STRING },
-                detectedHostName: { type: Type.STRING },
-                detectedVS: { type: Type.STRING },
-                detectedUnit: { type: Type.STRING },
-                dateArrival: { type: Type.STRING },
-                dateDeparture: { type: Type.STRING },
-                nights: { type: Type.INTEGER },
-                guests: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      lastName: { type: Type.STRING },
-                      firstName: { type: Type.STRING },
-                      birthDate: { type: Type.STRING },
-                      nationality: { type: Type.STRING },
-                      residenceCountry: { type: Type.STRING },
-                      city: { type: Type.STRING },
-                      street: { type: Type.STRING },
-                      homeAddress: { type: Type.STRING },
-                      documentType: { type: Type.STRING },
-                      passportNumber: { type: Type.STRING },
-                      documentIssuerCountry: { type: Type.STRING },
-                      visaNumber: { type: Type.STRING },
-                      purposeOfStay: { type: Type.STRING }
-                    },
-                    required: ['lastName', 'firstName']
-                  }
-                }
-              },
-              required: ['dateArrival', 'dateDeparture', 'nights', 'guests']
-            }
+            responseMimeType: 'application/json'
           }
         });
 
         const rawText = response.text;
         if (rawText) {
-          extractedData = JSON.parse(rawText);
+          let clean = rawText.trim();
+          if (clean.startsWith('```')) {
+            clean = clean.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+          }
+          extractedData = JSON.parse(clean);
           usedModel = candidate;
           break;
         }
       } catch (err: any) {
         console.warn(`[OCR] Model ${candidate} failed:`, err.message || err);
         lastError = err;
+        if (!isAuto) {
+          throw err;
+        }
       }
     }
 
     if (!extractedData) {
-      throw lastError || new Error('Žádný z dostupných modelů Gemini nedokázal zpracovat obrázek.');
+      throw lastError || new Error(`Model ${targetModel || 'Gemini'} nedokázal zpracovat obrázek.`);
     }
 
     res.json({
