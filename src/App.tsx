@@ -39,12 +39,12 @@ import {
   Search
 } from 'lucide-react';
 import { Property, Guest, PRAGUE_DISTRICTS } from './types';
-import { User } from 'firebase/auth';
 import {
   initAuth,
   googleSignIn,
   googleLogout,
   getAccessToken,
+  User,
   firebaseProjectId,
   firebaseConsoleAuthorizedDomainsUrl
 } from './lib/googleAuth';
@@ -79,6 +79,129 @@ import {
 } from './lib/ubyport';
 
 export const APP_VERSION = '2.0.0';
+
+/**
+ * Detailní ikona naskenovaného ubytovacího lístku / formuláře
+ * s ohnutým rohem, laserovým paprskem skeneru, zaměřovači a efektním nápisem Uby
+ */
+export const ScannedFormUbyIcon: React.FC<{ size?: number; className?: string }> = ({ size = 40, className = '' }) => (
+  <div
+    className={`relative shrink-0 flex items-center justify-center select-none ${className}`}
+    style={{ width: size, height: size }}
+  >
+    {/* Jemná neónová scanner aura */}
+    <div className="absolute inset-0 rounded-xl bg-gradient-to-tr from-blue-600/30 via-cyan-400/25 to-indigo-600/30 blur-sm pointer-events-none" />
+
+    {/* SVG ikona formuláře se skenem */}
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 48 48"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className="relative drop-shadow-[0_2px_6px_rgba(14,165,233,0.3)]"
+    >
+      <defs>
+        {/* Pozadí formulářového papíru */}
+        <linearGradient id="docGrad" x1="6" y1="4" x2="42" y2="44" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#1E293B" />
+          <stop offset="65%" stopColor="#0F172A" />
+          <stop offset="100%" stopColor="#090E17" />
+        </linearGradient>
+
+        {/* Laserový paprsek skeneru */}
+        <linearGradient id="laserBeamGrad" x1="6" y1="22" x2="42" y2="22" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#38BDF8" stopOpacity="0" />
+          <stop offset="25%" stopColor="#38BDF8" stopOpacity="0.9" />
+          <stop offset="50%" stopColor="#F0F9FF" stopOpacity="1" />
+          <stop offset="75%" stopColor="#38BDF8" stopOpacity="0.9" />
+          <stop offset="100%" stopColor="#06B6D4" stopOpacity="0" />
+        </linearGradient>
+
+        {/* Přechod textu Uby */}
+        <linearGradient id="ubyBadgeText" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="35%" stopColor="#E0F2FE" />
+          <stop offset="100%" stopColor="#38BDF8" />
+        </linearGradient>
+
+        {/* Ohnutý pravý horní roh */}
+        <linearGradient id="foldedCornerGrad" x1="32" y1="4" x2="42" y2="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#334155" />
+          <stop offset="100%" stopColor="#1E293B" />
+        </linearGradient>
+      </defs>
+
+      {/* Tělo listu papíru se seříznutým horním rohem */}
+      <path
+        d="M 10 5 C 7.8 5 6 6.8 6 9 L 6 39 C 6 41.2 7.8 43 10 43 L 38 43 C 40.2 43 42 41.2 42 39 L 42 14 L 33 5 Z"
+        fill="url(#docGrad)"
+        stroke="#38BDF8"
+        strokeWidth="1.2"
+        strokeOpacity="0.75"
+      />
+
+      {/* Ohnutý psí ouško (dog-ear fold) */}
+      <path
+        d="M 33 5 L 33 13 C 33 13.8 33.6 14.4 34.4 14.4 L 42 14 Z"
+        fill="url(#foldedCornerGrad)"
+        stroke="#38BDF8"
+        strokeWidth="1"
+        strokeOpacity="0.8"
+      />
+
+      {/* Miniaturní foto pasu / hosta na formuláři */}
+      <rect x="9.5" y="9" width="7.5" height="8.5" rx="1.5" fill="#1E293B" stroke="#60A5FA" strokeWidth="0.7" strokeOpacity="0.5" />
+      <circle cx="13.25" cy="12" r="1.8" fill="#93C5FD" fillOpacity="0.8" />
+      <path d="M 10.5 16 C 11 14.7 15.5 14.7 16 16" stroke="#93C5FD" strokeWidth="0.7" strokeOpacity="0.8" fill="none" />
+
+      {/* Řádky ubytovacího formuláře (Jméno, Příjmení, Pobyt) */}
+      <line x1="19.5" y1="9.5" x2="29.5" y2="9.5" stroke="#94A3B8" strokeWidth="1.2" strokeLinecap="round" strokeOpacity="0.7" />
+      <line x1="19.5" y1="13" x2="28" y2="13" stroke="#64748B" strokeWidth="0.9" strokeLinecap="round" strokeOpacity="0.6" />
+      <line x1="19.5" y1="16.5" x2="30.5" y2="16.5" stroke="#475569" strokeWidth="0.8" strokeLinecap="round" strokeOpacity="0.5" />
+
+      {/* Spodní řádky formuláře (Číslo pasu, Stát) */}
+      <line x1="9.5" y1="36" x2="24" y2="36" stroke="#64748B" strokeWidth="0.8" strokeLinecap="round" strokeOpacity="0.6" />
+      <line x1="9.5" y1="39" x2="33" y2="39" stroke="#475569" strokeWidth="0.8" strokeLinecap="round" strokeOpacity="0.5" />
+
+      {/* Středový scanner odznak s nápisem Uby */}
+      <rect
+        x="9"
+        y="21"
+        width="30"
+        height="12"
+        rx="3"
+        fill="#070C15"
+        fillOpacity="0.9"
+        stroke="#0284C7"
+        strokeWidth="0.9"
+      />
+
+      {/* Efektní nápis Uby uvnitř ikony */}
+      <text
+        x="24"
+        y="30.2"
+        textAnchor="middle"
+        fontFamily="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+        fontWeight="900"
+        fontSize="9.8"
+        letterSpacing="0.4px"
+        fill="url(#ubyBadgeText)"
+        style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))' }}
+      >
+        Uby
+      </text>
+
+      {/* Laserový scanner paprsek s jasným ohniskem */}
+      <line x1="7" y1="21" x2="41" y2="21" stroke="url(#laserBeamGrad)" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="24" cy="21" r="1.3" fill="#FFFFFF" />
+
+      {/* Optické rohy skeneru (viewfinder brackets) */}
+      <path d="M 4 11 L 4 4 L 11 4" stroke="#38BDF8" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M 44 37 L 44 44 L 37 44" stroke="#38BDF8" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  </div>
+);
 
 // Safe localStorage wrapper for Google Sites iframe sandboxes
 const safeStorage = {
@@ -479,25 +602,20 @@ export default function App() {
 
   // Google Login / Logout
   const handleGoogleLogin = async () => {
-    if (!userApiKey || !userApiKey.trim()) {
-      setIsMissingKeyModalOpen(true);
-      showToast('Pro přihlášení ke Google účtu zadejte svůj Google API klíč.', 'info');
-      return;
-    }
     try {
       setIsGoogleLoading(true);
-      const res = await googleSignIn(userApiKey.trim());
+      const res = await googleSignIn();
       if (!res) return;
       setCurrentUser(res.user);
       setGoogleToken(res.accessToken);
       await connectOrLoadGoogleSpreadsheet(res.accessToken);
-      showToast('Přihlášeno k účtu Google!', 'success');
+      showToast('Přihlášeno k účtu Google a Google Disk propojen!', 'success');
     } catch (err: any) {
       console.error('Google Sign-in failed', err);
       if (err.message && (err.message.includes('auth/unauthorized-domain') || err.message.includes('authorized domain'))) {
         setIsDomainModalOpen(true);
       } else {
-        showToast(`Přihlášení selhalo: ${err.message}`, 'warning');
+        showToast(`Přihlášení k účtu Google selhalo: ${err.message}`, 'warning');
       }
     } finally {
       setIsGoogleLoading(false);
@@ -1454,99 +1572,115 @@ export default function App() {
       )}
 
       {/* TOP HEADER */}
-      <header className="header-sharp bg-[#0D131F]/90 border-b border-slate-800/80 px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2 z-30 shrink-0 backdrop-blur-md">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-500 to-rose-500 flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
-            <ShieldCheck className="w-5 h-5 text-white" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <h1 className="text-sm font-extrabold tracking-tight text-white truncate">UbyExport</h1>
-              <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">
-                UbyPort 2.0
+      <header className="header-sharp bg-[#0D131F]/95 border-b border-slate-800/80 px-3.5 sm:px-5 py-2 z-30 shrink-0 backdrop-blur-md">
+        {/* ROW 1: Název aplikace UbyExport (umístěný nad levou ikonou) + Google Disk & Nastavení */}
+        <div className="flex items-center justify-between gap-2 pb-1.5">
+          {/* Vlevo nahoře: Název aplikace UbyExport a verze (nad ikonou) */}
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-white flex items-center gap-1">
+              <span className="bg-gradient-to-r from-white via-slate-100 to-sky-300 bg-clip-text text-transparent">
+                UbyExport
               </span>
-            </div>
-            {!userApiKey || !userApiKey.trim() ? (
+            </h1>
+            <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">
+              UbyPort 2.0
+            </span>
+          </div>
+
+          {/* Vpravo nahoře: Stav připojení Google Disk & Tlačítko Nastavení */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {currentUser ? (
               <button
-                onClick={() => setIsMissingKeyModalOpen(true)}
-                className="text-[11px] text-amber-400 hover:text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-lg font-semibold flex items-center gap-1.5 tap-active mt-0.5 cursor-pointer shadow-sm shadow-amber-500/10 animate-pulse"
-                title="Klikněte pro zadání Google API klíče"
+                onClick={() => {
+                  if (connectedSheet) {
+                    window.open(connectedSheet.url, '_blank');
+                  } else {
+                    handleGoogleLogin();
+                  }
+                }}
+                title={connectedSheet ? `Otevřít sešit: ${connectedSheet.title}` : 'Google Disk připojen'}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900 tap-active cursor-pointer text-xs font-semibold"
               >
-                <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span>Google API klíč</span>
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="text-[11px] font-medium">Disk</span>
+                <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                {isSyncingSheet && (
+                  <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping shrink-0" />
+                )}
               </button>
             ) : (
               <button
-                onClick={openModelSelector}
-                className="text-[11px] text-slate-400 hover:text-blue-300 font-mono flex items-center gap-1 tap-active mt-0.5 cursor-pointer truncate max-w-[140px]"
-                title="Změnit Gemini model"
+                onClick={handleGoogleLogin}
+                title="Přihlásit se k účtu Google pro synchronizaci a ukládání na Google Disk"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 tap-active cursor-pointer text-xs font-semibold"
               >
-                <Zap className="w-3 h-3 text-amber-400 shrink-0" />
-                <span className="truncate">{activeModelName}</span>
-                <ChevronDown className="w-2.5 h-2.5 shrink-0" />
+                <FileSpreadsheet className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-[11px] font-bold text-amber-300">Disk: Nepřipojeno</span>
               </button>
             )}
+
+            {/* Tlačítko Nastavení */}
+            <button
+              onClick={() => setIsSettingsModalOpen(true)}
+              className="p-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white tap-active cursor-pointer shrink-0"
+              title="Nastavení aplikace a API klíč"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
-        {/* PROPERTY PICKER & HEADER CONTROLS */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Ubytování selector */}
-          <div className="relative">
+        {/* ROW 2: Levá ikona naskenovaného formuláře s Uby uvnitř (přímo pod názvem) + Výběr modelu/klíče | Vpravo: Výběr ubytování */}
+        <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/40">
+          {/* Vlevo: Ikona naskenovaného formuláře s efektním Uby a indikátor/výběr modelu */}
+          <div className="flex items-center gap-2 min-w-0">
+            {/* Detailní ikona formuláře s efektním nápisem Uby */}
+            <ScannedFormUbyIcon size={36} />
+
+            {/* Model Gemini nebo tlačítko pro zadání Google API klíče */}
+            <div className="min-w-0 flex flex-col justify-center">
+              {!userApiKey || !userApiKey.trim() ? (
+                <button
+                  onClick={() => setIsMissingKeyModalOpen(true)}
+                  className="text-[10px] text-amber-400 hover:text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-md font-semibold flex items-center gap-1 tap-active cursor-pointer shadow-sm shadow-amber-500/10 animate-pulse whitespace-nowrap"
+                  title="Klikněte pro zadání Google API klíče"
+                >
+                  <KeyRound className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>Google API klíč</span>
+                </button>
+              ) : (
+                <button
+                  onClick={openModelSelector}
+                  className="text-[11px] text-slate-300 hover:text-sky-300 bg-slate-900/80 border border-slate-700/80 px-2 py-0.5 rounded-md font-mono flex items-center gap-1 tap-active cursor-pointer truncate max-w-[140px] sm:max-w-[190px]"
+                  title="Změnit Gemini model"
+                >
+                  <Zap className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span className="truncate">{activeModelName}</span>
+                  <ChevronDown className="w-2.5 h-2.5 text-slate-400 shrink-0" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Vpravo: Rozevírací seznam výběru ubytovacího zařízení */}
+          <div className="shrink-0 max-w-[50%] sm:max-w-[210px]">
             <button
               onClick={() => {
                 setPropModalMode('list');
                 setIsPropModalOpen(true);
               }}
-              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-white tap-active cursor-pointer max-w-[145px] sm:max-w-[170px]"
+              className="w-full flex items-center justify-between gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 px-2.5 py-1 rounded-xl text-xs font-semibold text-white tap-active cursor-pointer shadow-sm"
+              title="Vybrat ubytovací zařízení"
             >
-              <Building className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-              <span className="truncate">
-                {activeProperty ? activeProperty.name : 'Přidat ubytování'}
-              </span>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Building className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="truncate">
+                  {activeProperty ? activeProperty.name : 'Přidat ubytování'}
+                </span>
+              </div>
               <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
             </button>
           </div>
-
-          {/* Google Sheets / Drive status button */}
-          {currentUser ? (
-            <button
-              onClick={() => {
-                if (connectedSheet) {
-                  window.open(connectedSheet.url, '_blank');
-                } else {
-                  handleGoogleLogin();
-                }
-              }}
-              title={connectedSheet ? `Otevřít sešit: ${connectedSheet.title}` : 'Google Disk připojen'}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900 tap-active cursor-pointer text-xs font-semibold relative"
-            >
-              <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span className="hidden md:inline">Google Disk připojen</span>
-              {isSyncingSheet && (
-                <span className="w-2 h-2 bg-emerald-400 rounded-full animate-ping shrink-0" />
-              )}
-            </button>
-          ) : (
-            <button
-              onClick={handleGoogleLogin}
-              title="Přihlásit se k účtu Google pro synchronizaci a ukládání na Google Disk"
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 tap-active cursor-pointer text-xs font-semibold"
-            >
-              <FileSpreadsheet className="w-4 h-4 text-amber-400 shrink-0" />
-              <span className="hidden sm:inline">Google Disk: </span>
-              <span className="text-amber-400 font-bold">Nepřipojeno</span>
-            </button>
-          )}
-
-          {/* Nastavení tlačítko */}
-          <button
-            onClick={() => setIsSettingsModalOpen(true)}
-            className="p-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 hover:text-white tap-active cursor-pointer"
-            title="Nastavení aplikace a API klíč"
-          >
-            <Sliders className="w-4 h-4" />
-          </button>
         </div>
       </header>
 
