@@ -411,7 +411,9 @@ export default function App() {
         setConnectedSheet(null);
       }
     });
-    return () => unsubscribe();
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, []);
 
   // Connect or load Google Sheet

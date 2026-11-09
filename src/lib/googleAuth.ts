@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signOut } from 'firebase/auth';
+import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signOut, Auth } from 'firebase/auth';
 import rawConfig from '../../firebase-applet-config.json';
 
 // Dynamic API key resolution: reads from runtime env or local storage vault
@@ -21,13 +21,42 @@ export const resolveFirebaseApiKey = (customKey?: string): string => {
   return rawConfig.apiKey || '';
 };
 
-const getEffectiveConfig = (keyOverride?: string) => ({
-  ...rawConfig,
-  apiKey: resolveFirebaseApiKey(keyOverride)
-});
+let appInstance: any = null;
+let authInstance: Auth | null = null;
 
-let app = getApps().length > 0 ? getApp() : initializeApp(getEffectiveConfig());
-let auth = getAuth(app);
+export const getSafeApp = (keyOverride?: string) => {
+  const key = resolveFirebaseApiKey(keyOverride);
+  // Bez zadaného klíče neprovádíme inicializaci s prázdným řetězcem (ta by způsobila pád)
+  if (!key) return null;
+
+  try {
+    if (!appInstance) {
+      appInstance = getApps().length > 0 ? getApp() : initializeApp({ ...rawConfig, apiKey: key });
+    } else if (appInstance.options?.apiKey !== key) {
+      appInstance = initializeApp({ ...rawConfig, apiKey: key }, 'authApp_' + Date.now());
+      authInstance = null;
+    }
+    return appInstance;
+  } catch (err) {
+    console.warn('Firebase initializeApp warning:', err);
+    return null;
+  }
+};
+
+export const getSafeAuth = (keyOverride?: string): Auth | null => {
+  if (authInstance && (!keyOverride || appInstance?.options?.apiKey === keyOverride)) {
+    return authInstance;
+  }
+  const app = getSafeApp(keyOverride);
+  if (!app) return null;
+  try {
+    authInstance = getAuth(app);
+    return authInstance;
+  } catch (err) {
+    console.warn('Firebase getAuth warning:', err);
+    return null;
+  }
+};
 
 const provider = new GoogleAuthProvider();
 // Required Google Workspace Scopes
@@ -40,20 +69,31 @@ let cachedAccessToken: string | null = null;
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
-) => {
-  return onAuthStateChanged(auth, async (user: User | null) => {
-    if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        // Token must be in memory; if user is restored without token, prompt user interaction
+): (() => void) => {
+  const currentAuth = getSafeAuth();
+  if (!currentAuth) {
+    if (onAuthFailure) onAuthFailure();
+    return () => {};
+  }
+  try {
+    return onAuthStateChanged(currentAuth, async (user: User | null) => {
+      if (user) {
+        if (cachedAccessToken) {
+          if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
+        } else if (!isSigningIn) {
+          // Token must be in memory; if user is restored without token, prompt user interaction
+          if (onAuthFailure) onAuthFailure();
+        }
+      } else {
+        cachedAccessToken = null;
         if (onAuthFailure) onAuthFailure();
       }
-    } else {
-      cachedAccessToken = null;
-      if (onAuthFailure) onAuthFailure();
-    }
-  });
+    });
+  } catch (e) {
+    console.warn('onAuthStateChanged error:', e);
+    if (onAuthFailure) onAuthFailure();
+    return () => {};
+  }
 };
 
 export const googleSignIn = async (userKey?: string): Promise<{ user: User; accessToken: string } | null> => {
@@ -63,14 +103,9 @@ export const googleSignIn = async (userKey?: string): Promise<{ user: User; acce
     if (!effectiveKey) {
       throw new Error('Pro přihlášení ke Google účtu zadejte svůj Google API klíč.');
     }
-    // Reconfigure app with effective API key if different
-    if (app.options.apiKey !== effectiveKey) {
-      try {
-        app = initializeApp({ ...rawConfig, apiKey: effectiveKey }, 'authApp_' + Date.now());
-        auth = getAuth(app);
-      } catch {
-        // fallback to default instance
-      }
+    const auth = getSafeAuth(effectiveKey);
+    if (!auth) {
+      throw new Error('Nepodařilo se inicializovat Google autentizaci. Zkontrolujte prosím svůj Google API klíč.');
     }
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
@@ -93,7 +128,12 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 export const googleLogout = async (): Promise<void> => {
-  await signOut(auth);
+  const auth = getSafeAuth();
+  if (auth) {
+    try {
+      await signOut(auth);
+    } catch {}
+  }
   cachedAccessToken = null;
 };
 
