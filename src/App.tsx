@@ -44,6 +44,8 @@ import {
   googleSignIn,
   googleLogout,
   getAccessToken,
+  getActiveOAuthClientId,
+  setCustomOAuthClientId,
   User,
   firebaseProjectId,
   firebaseConsoleAuthorizedDomainsUrl
@@ -370,6 +372,9 @@ export default function App() {
   const [isWebcamOpen, setIsWebcamOpen] = useState<boolean>(false);
   const [isDesktopCameraPromptOpen, setIsDesktopCameraPromptOpen] = useState<boolean>(false);
   const [isDomainModalOpen, setIsDomainModalOpen] = useState<boolean>(false);
+  const [customOAuthClientId, setCustomOAuthClientIdState] = useState<string>(() => {
+    return safeStorage.getItem('ubyport_custom_oauth_client_id') || '';
+  });
 
   // UNL Import Modal State
   const [isUnlImportModalOpen, setIsUnlImportModalOpen] = useState<boolean>(false);
@@ -612,11 +617,12 @@ export default function App() {
       showToast('Přihlášeno k účtu Google a Google Disk propojen!', 'success');
     } catch (err: any) {
       console.error('Google Sign-in failed', err);
-      if (err.message && (err.message.includes('auth/unauthorized-domain') || err.message.includes('authorized domain'))) {
+      const isCustomDomain = typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+      const msg = err?.message || '';
+      if (isCustomDomain || msg.includes('unauthorized') || msg.includes('domain') || msg.includes('origin') || msg.includes('zavřeno') || msg.includes('closed') || msg.includes('400')) {
         setIsDomainModalOpen(true);
-      } else {
-        showToast(`Přihlášení k účtu Google selhalo: ${err.message}`, 'warning');
       }
+      showToast(`Google přihlášení: ${msg}`, 'warning');
     } finally {
       setIsGoogleLoading(false);
     }
@@ -3405,6 +3411,20 @@ export default function App() {
                     Přihlásit se k účtu Google
                   </button>
                 )}
+
+                <div className="pt-1.5 flex items-center justify-between text-[10px] text-slate-400">
+                  <span>Hlásí Google chybu 400 (origin_mismatch)?</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSettingsModalOpen(false);
+                      setIsDomainModalOpen(true);
+                    }}
+                    className="text-sky-400 hover:underline font-semibold"
+                  >
+                    Návod autorizace domény
+                  </button>
+                </div>
               </div>
 
               <div className="flex gap-2 pt-2">
@@ -3597,37 +3617,153 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL 9: FIREBASE AUTHORIZED DOMAIN WARNING */}
+      {/* MODAL 9: GOOGLE OAUTH DOMAIN & ORIGIN MISMATCH GUIDE */}
       {isDomainModalOpen && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-5 space-y-4 text-xs">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base text-amber-400 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5" />
-                Autorizace domény ve Firebase
-              </h3>
-              <button onClick={() => setIsDomainModalOpen(false)} className="text-slate-400 hover:text-white p-1">
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-4 sm:p-5 space-y-3.5 text-xs shadow-2xl my-auto">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3 gap-2">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-white text-sm sm:text-base">
+                    Autorizace Google OAuth (Chyba 400)
+                  </h3>
+                  <p className="text-[11px] text-amber-300/90 font-mono">
+                    origin_mismatch / Nepovolený zdroj JavaScriptu
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsDomainModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 tap-active shrink-0"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <p className="text-slate-300 leading-relaxed">
-              Tato doména (<code>{window.location.hostname}</code>) zatím není přidána mezi povolené domény ve Firebase Authentication konzoli projektu <code>{firebaseProjectId}</code>.
-            </p>
-            <div className="pt-2 flex gap-2">
+
+            {/* Explanation */}
+            <div className="p-3 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-2">
+              <p className="text-slate-300 leading-relaxed text-[11px]">
+                Google OAuth 2.0 z bezpečnostních důvodů vyžaduje, aby každá webová adresa (včetně vašeho repozitáře na GitHub Pages) byla zapsána v Google Cloud Console v sekci <strong className="text-white">Autorizované zdroje JavaScriptu</strong>.
+              </p>
+
+              {/* Current Origin Box with 1-Click Copy */}
+              <div className="pt-1">
+                <label className="text-[10px] font-bold text-slate-400 block mb-1">
+                  Původ vašeho webu (Origin) pro vložení do Google konzole:
+                </label>
+                <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-xl p-2 font-mono text-xs text-sky-300 break-all select-all">
+                  <Globe className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span className="flex-1 font-bold">
+                    {typeof window !== 'undefined' ? window.location.origin : 'https://leoclxen.github.io'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://leoclxen.github.io';
+                      navigator.clipboard.writeText(origin);
+                      showToast('Původ webu zkopírován do schránky!', 'success');
+                    }}
+                    className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-[10px] font-bold shrink-0 tap-active flex items-center gap-1 cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Kopírovat</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Step-by-Step Instructions */}
+            <div className="space-y-1.5 text-[11px] text-slate-300">
+              <p className="font-bold text-white text-xs">Jak povolit přihlášení (zabere 1 minutu):</p>
+              <ol className="list-decimal list-inside space-y-1 pl-1 text-slate-400">
+                <li>
+                  Klikněte níže na tlačítko <strong className="text-blue-400">Přejít do Google Cloud Console</strong>.
+                </li>
+                <li>
+                  V sekci <strong className="text-white">Identifikátory klientů OAuth 2.0</strong> rozklikněte vašeho Web klienta.
+                </li>
+                <li>
+                  V části <strong className="text-white">Autorizované zdroje JavaScriptu</strong> klikněte na <em>+ PŘIDAT IDENTIFIKÁTOR URI</em> a vložte zkopírovanou adresu výše (bez lomítka na konci).
+                </li>
+                <li>
+                  Klikněte na <strong className="text-emerald-400">ULOŽIT</strong> (Google změnu propíše během 1–2 minut).
+                </li>
+              </ol>
+            </div>
+
+            {/* Custom OAuth Client ID Config (Optional) */}
+            <div className="pt-1 border-t border-slate-800/80">
+              <details className="group">
+                <summary className="text-[11px] text-slate-400 hover:text-white cursor-pointer select-none flex items-center justify-between">
+                  <span>Máte vlastní Google Cloud projekt? (Zadat vlastní Client ID)</span>
+                  <ChevronDown className="w-3.5 h-3.5 group-open:rotate-180 transition-transform" />
+                </summary>
+                <div className="pt-2 space-y-1.5">
+                  <input
+                    type="text"
+                    value={customOAuthClientId}
+                    onChange={(e) => setCustomOAuthClientIdState(e.target.value)}
+                    placeholder="180459556553-...apps.googleusercontent.com"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-white font-mono placeholder:text-slate-600"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomOAuthClientId(customOAuthClientId);
+                        showToast(customOAuthClientId ? 'Vlastní Client ID uloženo!' : 'Obnoveno výchozí Client ID', 'success');
+                      }}
+                      className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-[10px] font-bold tap-active"
+                    >
+                      Uložit Client ID
+                    </button>
+                    {customOAuthClientId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomOAuthClientIdState('');
+                          setCustomOAuthClientId('');
+                          showToast('Obnoveno výchozí Client ID', 'info');
+                        }}
+                        className="px-2 py-1 text-slate-400 hover:text-rose-400 text-[10px] tap-active"
+                      >
+                        Resetovat na výchozí
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            {/* Offline / Local mode notice */}
+            <div className="p-2.5 rounded-xl bg-blue-950/30 border border-blue-500/20 text-blue-300 text-[11px] flex items-start gap-2">
+              <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+              <p>
+                <strong>Tip:</strong> Aplikace funguje spolehlivě i bez Google účtu. Všechna ubytování a hosty ukládá v paměti vašeho telefonu a hotový soubor <strong>.UNL</strong> pro cizineckou policii můžete kdykoliv exportovat a stáhnout na záložce <em>Export UNL</em>.
+              </p>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="pt-2 flex flex-col sm:flex-row gap-2">
               <button
+                type="button"
                 onClick={() => setIsDomainModalOpen(false)}
-                className="flex-1 py-2 bg-slate-800 text-slate-300 rounded-xl font-semibold tap-active"
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
               >
-                Rozumím
+                Zavřít
               </button>
               {firebaseConsoleAuthorizedDomainsUrl && (
                 <a
                   href={firebaseConsoleAuthorizedDomainsUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex-1 py-2 bg-blue-600 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active"
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
                 >
-                  <span>Přejít do konzole</span>
+                  <span>Přejít do Google Cloud Console</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               )}

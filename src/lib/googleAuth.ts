@@ -1,28 +1,81 @@
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import {
+  getAuth,
+  signInWithPopup,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signOut,
+  User as FirebaseUser
+} from 'firebase/auth';
 import rawConfig from '../../firebase-applet-config.json';
 
-export interface User {
+export type User = FirebaseUser | {
   uid: string;
   displayName?: string | null;
   email?: string | null;
   photoURL?: string | null;
-}
+};
 
 export const OAUTH_CLIENT_ID =
   rawConfig.oAuthClientId ||
   '180459556553-bukbnnghoblqvq577ku007b5los0el4s.apps.googleusercontent.com';
 
-export const OAUTH_SCOPES = [
-  'https://www.googleapis.com/auth/spreadsheets',
+export const getActiveOAuthClientId = (): string => {
+  try {
+    const custom = localStorage.getItem('ubyport_custom_oauth_client_id');
+    if (custom && custom.trim()) return custom.trim();
+  } catch {}
+  return OAUTH_CLIENT_ID;
+};
+
+export const setCustomOAuthClientId = (clientId: string): void => {
+  try {
+    if (!clientId || !clientId.trim()) {
+      localStorage.removeItem('ubyport_custom_oauth_client_id');
+    } else {
+      localStorage.setItem('ubyport_custom_oauth_client_id', clientId.trim());
+    }
+  } catch {}
+};
+
+export const getFirebaseApiKey = (): string => {
+  try {
+    const custom = localStorage.getItem('ubyport_firebase_api_key');
+    if (custom && custom.trim()) return custom.trim();
+    const userGemini = localStorage.getItem('ubyport_user_api_key');
+    if (userGemini && userGemini.trim()) return userGemini.trim();
+  } catch {}
+  return rawConfig.apiKey || '';
+};
+
+export const setFirebaseApiKey = (key: string): void => {
+  try {
+    if (!key || !key.trim()) {
+      localStorage.removeItem('ubyport_firebase_api_key');
+    } else {
+      localStorage.setItem('ubyport_firebase_api_key', key.trim());
+    }
+  } catch {}
+};
+
+/**
+ * Scopes pro Google Docs, Google Drive, Google Sheets a profil uživatele
+ */
+export const WORKSPACE_SCOPES = [
+  'https://www.googleapis.com/auth/documents',
   'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/userinfo.email'
-].join(' ');
+];
+
+export const OAUTH_SCOPES = WORKSPACE_SCOPES.join(' ');
 
 let cachedAccessToken: string | null = null;
 let currentUserInstance: User | null = null;
 let authStateListeners: ((user: User | null) => void)[] = [];
 
-// Pokus o obnovení uložené relace ze sessionStorage a localStorage
+// Obnovení uložené relace ze sessionStorage a localStorage
 try {
   const savedUser = localStorage.getItem('ubyport_google_user');
   if (savedUser) {
@@ -37,7 +90,35 @@ try {
 }
 
 /**
- * Dynamicky zajistí načtení Google Identity Services (GSI) knihovny
+ * Inicializace Firebase App
+ */
+export const getFirebaseApp = () => {
+  const existing = getApps();
+  if (existing.length > 0) {
+    return existing[0];
+  }
+  const apiKey = getFirebaseApiKey();
+  const config = {
+    ...rawConfig,
+    apiKey: apiKey || rawConfig.apiKey || 'AIzaSyPlaceholderForAuthInit'
+  };
+  return initializeApp(config);
+};
+
+export const getFirebaseAuth = () => {
+  const app = getFirebaseApp();
+  return getAuth(app);
+};
+
+export const getGoogleAuthProvider = () => {
+  const provider = new GoogleAuthProvider();
+  WORKSPACE_SCOPES.forEach(scope => provider.addScope(scope));
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return provider;
+};
+
+/**
+ * Dynamicky zajistí načtení Google Identity Services (GSI) knihovny jako spolehlivé zálohy
  */
 export const ensureGsiClient = (): Promise<any> => {
   return new Promise((resolve, reject) => {
@@ -69,32 +150,9 @@ export const ensureGsiClient = (): Promise<any> => {
 };
 
 /**
- * Inicializace sledování stavu Google přihlášení
+ * Záložní přímé Google OAuth2 přihlášení (GIS) pro Google Docs / Drive
  */
-export const initAuth = (
-  onAuthChange: (user: User | null) => void
-): (() => void) => {
-  authStateListeners.push(onAuthChange);
-
-  // Pokud máme z dřívějška platný uživatelský profil a token v session, ihned informujeme
-  if (currentUserInstance && cachedAccessToken) {
-    onAuthChange(currentUserInstance);
-  } else if (currentUserInstance) {
-    onAuthChange(currentUserInstance);
-  } else {
-    onAuthChange(null);
-  }
-
-  return () => {
-    authStateListeners = authStateListeners.filter(l => l !== onAuthChange);
-  };
-};
-
-/**
- * Spustí přímé Google OAuth2 přihlášení s vyžádáním přístupu ke Google Disk a Tabulkám
- * Nevyžaduje ŽÁDNÝ Firebase Web API klíč ani Gemini API klíč!
- */
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string }> => {
+const signInWithGsi = async (): Promise<{ user: User; accessToken: string }> => {
   const oauth2 = await ensureGsiClient();
   if (!oauth2) {
     throw new Error('Knihovna Google OAuth2 není v prohlížeči dostupná.');
@@ -103,7 +161,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
   return new Promise((resolve, reject) => {
     try {
       const client = oauth2.initTokenClient({
-        client_id: OAUTH_CLIENT_ID,
+        client_id: getActiveOAuthClientId(),
         scope: OAUTH_SCOPES,
         callback: async (tokenResponse: any) => {
           if (tokenResponse.error) {
@@ -113,7 +171,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
             if (errCode === 'popup_closed_by_user') {
               msg = 'Okno pro přihlášení k účtu Google bylo zavřeno.';
             } else if (errCode === 'access_denied') {
-              msg = 'Přístup k účtu Google a Google Disku byl zamítnut.';
+              msg = 'Přístup k účtu Google a Google Docs byl zamítnut.';
             }
             reject(new Error(msg));
             return;
@@ -129,7 +187,6 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
             sessionStorage.setItem('ubyport_google_token', cachedAccessToken!);
           } catch {}
 
-          // Zjištění profilu uživatele přes Google UserInfo API
           let user: User = {
             uid: `user_${Date.now()}`,
             displayName: 'Google Uživatel'
@@ -157,9 +214,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
             localStorage.setItem('ubyport_google_user', JSON.stringify(user));
           } catch {}
 
-          // Informovat všechny posluchače
           authStateListeners.forEach(listener => listener(user));
-
           resolve({ user, accessToken: cachedAccessToken! });
         },
         error_callback: (err: any) => {
@@ -168,7 +223,6 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
         }
       });
 
-      // Zobrazí Google dialog pro výběr účtu
       client.requestAccessToken({ prompt: 'consent' });
     } catch (err: any) {
       console.error('Chyba při spuštění Google přihlášení:', err);
@@ -178,16 +232,113 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 };
 
 /**
- * Vrátí aktuální přístupový token Google (pro Sheets / Drive API)
+ * Inicializace sledování stavu Google přihlášení (přes Firebase Auth a relaci)
+ */
+export const initAuth = (
+  onAuthChange: (user: User | null) => void
+): (() => void) => {
+  authStateListeners.push(onAuthChange);
+
+  let unsubscribeFirebase: (() => void) | null = null;
+  try {
+    const auth = getFirebaseAuth();
+    unsubscribeFirebase = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        currentUserInstance = fbUser;
+        onAuthChange(fbUser);
+      } else if (!cachedAccessToken) {
+        currentUserInstance = null;
+        onAuthChange(null);
+      }
+    });
+  } catch {
+    if (currentUserInstance) {
+      onAuthChange(currentUserInstance);
+    } else {
+      onAuthChange(null);
+    }
+  }
+
+  return () => {
+    authStateListeners = authStateListeners.filter(l => l !== onAuthChange);
+    if (unsubscribeFirebase) unsubscribeFirebase();
+  };
+};
+
+/**
+ * Spustí autorizaci a přihlášení ke Google Docs a Workspace primárně přes Firebase Auth
+ */
+export const googleSignIn = async (): Promise<{ user: User; accessToken: string }> => {
+  try {
+    const auth = getFirebaseAuth();
+    const provider = getGoogleAuthProvider();
+
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const accessToken = credential?.accessToken;
+
+    if (!accessToken) {
+      throw new Error('Firebase Auth nevrátil přístupový OAuth token pro Google Docs.');
+    }
+
+    const user: User = {
+      uid: result.user.uid,
+      displayName: result.user.displayName || result.user.email || 'Google Uživatel',
+      email: result.user.email,
+      photoURL: result.user.photoURL
+    };
+
+    cachedAccessToken = accessToken;
+    currentUserInstance = user;
+
+    try {
+      sessionStorage.setItem('ubyport_google_token', accessToken);
+      localStorage.setItem('ubyport_google_user', JSON.stringify(user));
+    } catch {}
+
+    authStateListeners.forEach(listener => listener(user));
+    return { user, accessToken };
+  } catch (firebaseErr: any) {
+    console.warn('Firebase Auth sign-in failed, analyzing error:', firebaseErr);
+    const errCode = firebaseErr.code || '';
+    const errMsg = firebaseErr.message || '';
+
+    // Doménový nesoulad ve Firebase
+    if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain')) {
+      throw firebaseErr;
+    }
+
+    // Pokud uživatel zavřel popup
+    if (errCode === 'auth/popup-closed-by-user' || errMsg.includes('popup-closed-by-user')) {
+      throw new Error('Přihlašovací okno bylo zavřeno.');
+    }
+
+    // Pokud chybí API klíč Firebase nebo selže s invalid-api-key, zkusíme záložní přímý GIS token klient pro Google Docs
+    try {
+      console.log('Zkouším autorizaci Google Docs přes Google Identity Services fallback...');
+      return await signInWithGsi();
+    } catch (gsiErr: any) {
+      throw new Error(firebaseErr.message || gsiErr.message);
+    }
+  }
+};
+
+/**
+ * Vrátí aktuální přístupový token Google (pro Docs / Sheets / Drive API)
  */
 export const getAccessToken = async (): Promise<string | null> => {
   return cachedAccessToken;
 };
 
 /**
- * Odhlášení uživatele a zrušení tokenu
+ * Odhlášení uživatele a zrušení tokenu přes Firebase Auth
  */
 export const googleLogout = async (): Promise<void> => {
+  try {
+    const auth = getFirebaseAuth();
+    await signOut(auth);
+  } catch {}
+
   if (cachedAccessToken && typeof window !== 'undefined' && (window as any).google?.accounts?.oauth2?.revoke) {
     try {
       (window as any).google.accounts.oauth2.revoke(cachedAccessToken, () => {});
