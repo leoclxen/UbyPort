@@ -46,6 +46,10 @@ import {
   getAccessToken,
   getActiveOAuthClientId,
   setCustomOAuthClientId,
+  isValidOAuthClientId,
+  isUsingCustomOAuthClientId,
+  clearStoredAccessToken,
+  OAUTH_CLIENT_ID,
   getFirebaseApiKey,
   setFirebaseApiKey,
   hasFirebaseApiKey,
@@ -608,7 +612,15 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Google Sheet connect error:', err);
-      showToast(`Chyba připojení k Google Sheetu: ${err.message}`, 'warning');
+      const errMsg = err?.message || '';
+      if (errMsg.includes('401') || errMsg.includes('UNAUTHENTICATED') || errMsg.includes('Invalid Credentials')) {
+        clearStoredAccessToken();
+        setGoogleToken(null);
+        setConnectedSheet(null);
+        showToast('Platnost Google relace vypršela. Přihlaste se prosím znovu.', 'warning');
+      } else {
+        showToast(`Chyba připojení k Google Sheetu: ${errMsg}`, 'warning');
+      }
     } finally {
       setIsGoogleLoading(false);
     }
@@ -637,9 +649,26 @@ export default function App() {
       const errCode = err?.code || '';
       const msg = err?.message || '';
 
-      // Uživatel pouze zavřel popup - žádný chybový modal, pouze tichá/informační notifikace!
+      // Uživatel zavřel popup
       if (errCode === 'auth/popup-closed-by-user' || msg.includes('zavřeno') || msg.includes('closed')) {
-        showToast('Přihlášení bylo zrušeno.', 'info');
+        const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+        if (method === 'gis' && !isLocal && !isUsingCustomOAuthClientId()) {
+          showToast('Přihlášení OAuth2 bylo zavřeno. Pokud Google zobrazil chybu 400, zadejte vlastní OAuth Client ID v Nastavení.', 'info');
+        } else {
+          showToast('Přihlášení bylo zrušeno.', 'info');
+        }
+        return;
+      }
+
+      // Zablokované vyskakovací okno
+      if (errCode === 'auth/popup-blocked') {
+        showToast('Prohlížeč zablokoval vyskakovací okno pro přihlášení. Povolte prosím vyskakovací okna pro tento web.', 'warning');
+        return;
+      }
+
+      // Omezený / sandboxovaný iframe bez platného původu (null origin)
+      if (errCode === 'invalid_origin_context') {
+        showToast(msg, 'warning');
         return;
       }
 
@@ -658,11 +687,21 @@ export default function App() {
         return;
       }
 
-      // Origin mismatch v Google Cloud Console (při použití přímého GIS)
-      if (errCode === 'origin_mismatch' || msg.includes('origin_mismatch') || msg.includes('400')) {
+      // Chyba OAuth2 požadavku / origin_mismatch / neplatné Client ID (Chyba 400)
+      if (
+        errCode === 'origin_mismatch' ||
+        errCode === 'redirect_uri_mismatch' ||
+        errCode === 'invalid_request' ||
+        errCode === 'invalid_client' ||
+        errCode === 'invalid_client_id' ||
+        errCode === 'unauthorized_client' ||
+        msg.includes('origin_mismatch') ||
+        msg.includes('invalid_request') ||
+        msg.includes('400')
+      ) {
         setDomainModalType('gis');
         setIsDomainModalOpen(true);
-        showToast('Původ webu není povolen v Google Cloud Console (Chyba 400).', 'warning');
+        showToast('Chyba OAuth2 (400): Původ webu nebo OAuth Client ID vyžaduje nastavení v Google Cloud Console.', 'warning');
         return;
       }
 
@@ -3447,13 +3486,22 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => handleGoogleLogin('firebase')}
-                    className="w-full py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
-                  >
-                    Přihlásit se přes Firebase k účtu Google
-                  </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleGoogleLogin('firebase')}
+                      className="w-full py-2 px-3 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
+                    >
+                      Přihlásit přes Firebase
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleGoogleLogin('gis')}
+                      className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                    >
+                      Přímé OAuth2 (GIS)
+                    </button>
+                  </div>
                 )}
 
                 <div className="pt-2 border-t border-slate-800/80 space-y-2">
@@ -3465,14 +3513,29 @@ export default function App() {
                         setIsSettingsModalOpen(false);
                         setIsFirebaseKeyModalOpen(true);
                       }}
-                      className="text-sky-400 hover:underline font-semibold text-[11px]"
+                      className="text-sky-400 hover:underline font-semibold text-[11px] cursor-pointer"
                     >
                       {hasFirebaseApiKey() ? 'Uložen (Změnit)' : 'Chybí (Zadat klíč)'}
                     </button>
                   </div>
 
                   <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400">Povolení domény:</span>
+                    <span className="text-slate-400">OAuth2 Client ID & Původ:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDomainModalType('gis');
+                        setIsSettingsModalOpen(false);
+                        setIsDomainModalOpen(true);
+                      }}
+                      className="text-blue-400 hover:underline font-semibold text-[11px] cursor-pointer"
+                    >
+                      {isUsingCustomOAuthClientId() ? 'Vlastní Client ID' : 'Nastavit / Opravit'}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-400">Doména pro Firebase:</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -3480,7 +3543,7 @@ export default function App() {
                         setIsSettingsModalOpen(false);
                         setIsDomainModalOpen(true);
                       }}
-                      className="text-amber-400 hover:underline font-semibold text-[11px]"
+                      className="text-amber-400 hover:underline font-semibold text-[11px] cursor-pointer"
                     >
                       Autorizované domény Firebase
                     </button>
@@ -3753,12 +3816,12 @@ export default function App() {
             ) : (
               <div className="space-y-3">
                 <p className="text-slate-300 leading-relaxed text-[11px]">
-                  Google OAuth 2.0 (GIS) vyžaduje zapsání adresy do Google Cloud Console v sekci <strong className="text-white">Autorizované zdroje JavaScriptu</strong> pro klientské ID <code className="text-sky-300 font-mono text-[10px] break-all">{getActiveOAuthClientId()}</code>.
+                  Google OAuth 2.0 (GIS) vyžaduje, aby byl původ webu (<strong className="text-white">Origin</strong>) zapsán v Google Cloud Console v sekci <strong className="text-white">Autorizované zdroje JavaScriptu</strong> u aktivního klientského ID. Výchozí ID projektu je určeno primárně pro Firebase Authentication – pro přímé OAuth2 na vlastní doméně vložte své Web OAuth Client ID níže.
                 </p>
 
                 <div>
                   <label className="text-[10px] font-bold text-slate-400 block mb-1">
-                    Původ webu (Origin) pro vložení do Google Cloud:
+                    Původ webu (Origin) pro vložení do Google Cloud (bez lomítka na konci):
                   </label>
                   <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-xl p-2 font-mono text-xs text-sky-300 break-all select-all">
                     <Globe className="w-4 h-4 text-sky-400 shrink-0" />
@@ -3780,13 +3843,67 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Vlastní OAuth Client ID editor s validací formátu */}
+                <div className="space-y-1.5 bg-slate-950/70 p-3 rounded-2xl border border-slate-800">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">
+                      Vlastní Web OAuth 2.0 Client ID (volitelné)
+                    </label>
+                    {isUsingCustomOAuthClientId() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomOAuthClientId('');
+                          setCustomOAuthClientIdState('');
+                          showToast('Obnoveno výchozí OAuth Client ID.', 'info');
+                        }}
+                        className="text-[10px] text-amber-400 hover:underline font-semibold cursor-pointer"
+                      >
+                        Obnovit výchozí
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={customOAuthClientId}
+                      onChange={(e) => setCustomOAuthClientIdState(e.target.value)}
+                      placeholder={OAUTH_CLIENT_ID}
+                      className="flex-1 bg-slate-900 border border-slate-700 focus:border-blue-500 rounded-xl px-2.5 py-1.5 text-[11px] text-white font-mono placeholder:text-slate-600 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const val = customOAuthClientId.trim();
+                        if (val && !isValidOAuthClientId(val)) {
+                          showToast('Neplatný formát Client ID. Musí končit na .apps.googleusercontent.com', 'warning');
+                          return;
+                        }
+                        try {
+                          setCustomOAuthClientId(val);
+                          setCustomOAuthClientIdState(val);
+                          showToast(val ? 'Vlastní OAuth Client ID uloženo!' : 'Obnoveno výchozí Client ID.', 'success');
+                        } catch (err: any) {
+                          showToast(err.message, 'warning');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[11px] font-bold tap-active shrink-0 cursor-pointer"
+                    >
+                      Uložit ID
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-snug">
+                    Aktivní ID: <code className="text-sky-300 font-mono break-all">{getActiveOAuthClientId()}</code>
+                  </p>
+                </div>
+
                 <div className="space-y-1.5 text-[11px] text-slate-300 bg-slate-950/60 p-3 rounded-2xl border border-slate-800">
                   <p className="font-bold text-white text-xs">Postup povolení v Google Cloud Console:</p>
                   <ol className="list-decimal list-inside space-y-1 pl-1 text-slate-400">
-                    <li>Klikněte níže na <strong className="text-blue-400">Přejít do Google Cloud Console</strong>.</li>
-                    <li>Rozklikněte Webového klienta v sekci <strong className="text-white">Identifikátory klientů OAuth 2.0</strong>.</li>
-                    <li>Do sekce <strong className="text-white">Autorizované zdroje JavaScriptu</strong> přidejte zkopírovanou adresu bez lomítka na konci.</li>
-                    <li>Uložte změny.</li>
+                    <li>Vytvořte nebo rozklikněte klienta typu <strong className="text-white">Webová aplikace</strong> v <strong className="text-white">Identifikátory klientů OAuth 2.0</strong>.</li>
+                    <li>Do sekce <strong className="text-white">Autorizované zdroje JavaScriptu</strong> přidejte zkopírovanou adresu výše (bez lomítka na konci).</li>
+                    <li>Pokud je aplikace v režimu <em>Testování</em>, přidejte svůj e-mail v sekci <strong>Obrazovka souhlasu OAuth &rarr; Testovací uživatelé</strong>.</li>
+                    <li>Uložte změny a vložte Client ID výše (Google změnu propíše během 1–3 minut).</li>
                   </ol>
                 </div>
               </div>
@@ -3805,7 +3922,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsDomainModalOpen(false)}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
+                className="py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
               >
                 Zavřít
               </button>
@@ -3820,15 +3937,27 @@ export default function App() {
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               ) : (
-                <a
-                  href={googleCloudCredentialsUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
-                >
-                  <span>Přejít do Google Cloud Console</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                <>
+                  <a
+                    href={googleCloudCredentialsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer"
+                  >
+                    <span>Google Cloud Console</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsDomainModalOpen(false);
+                      handleGoogleLogin('gis');
+                    }}
+                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
+                  >
+                    Zkusit OAuth2 znovu
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -3921,17 +4050,30 @@ export default function App() {
                 >
                   Zrušit
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsFirebaseKeyModalOpen(false);
-                    setAuthMethodChoice('gis');
-                    handleGoogleLogin('gis');
-                  }}
-                  className="py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                >
-                  Zkusit přímé Google OAuth (GIS)
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsFirebaseKeyModalOpen(false);
+                      setDomainModalType('gis');
+                      setIsDomainModalOpen(true);
+                    }}
+                    className="py-2 px-2.5 text-sky-400 hover:underline text-[11px] font-semibold cursor-pointer"
+                  >
+                    Nastavit OAuth ID
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsFirebaseKeyModalOpen(false);
+                      setAuthMethodChoice('gis');
+                      handleGoogleLogin('gis');
+                    }}
+                    className="py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                  >
+                    Zkusit přímé Google OAuth (GIS)
+                  </button>
+                </div>
               </div>
             </div>
           </div>

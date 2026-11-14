@@ -1,4 +1,4 @@
-import { initializeApp, getApps } from 'firebase/app';
+import { initializeApp, getApps, deleteApp, FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   signInWithPopup,
@@ -16,30 +16,68 @@ export type User = FirebaseUser | {
   photoURL?: string | null;
 };
 
-export const firebaseProjectId = rawConfig.projectId || 'gen-lang-client-0432990418';
+export const firebaseProjectId = rawConfig.projectId || '';
 export const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${firebaseProjectId}/authentication/settings`;
 export const firebaseGeneralSettingsUrl = `https://console.firebase.google.com/project/${firebaseProjectId}/settings/general`;
 export const googleCloudCredentialsUrl = `https://console.cloud.google.com/apis/credentials?project=${firebaseProjectId}`;
 
-export const OAUTH_CLIENT_ID =
-  rawConfig.oAuthClientId ||
-  '180459556553-bukbnnghoblqvq577ku007b5los0el4s.apps.googleusercontent.com';
+export const OAUTH_CLIENT_ID = rawConfig.oAuthClientId || '';
+
+const CUSTOM_OAUTH_CLIENT_KEY = 'ubyport_custom_oauth_client_id';
+const OAUTH_CLIENT_ID_REGEX = /^[0-9]+-[a-zA-Z0-9._-]+\.apps\.googleusercontent\.com$/;
+
+export const sanitizeOAuthClientId = (raw: string): string => {
+  return (raw || '')
+    .replace(/[\s"'`<>]/g, '')
+    .trim();
+};
+
+export const isValidOAuthClientId = (clientId: string): boolean => {
+  const cleaned = sanitizeOAuthClientId(clientId);
+  return OAUTH_CLIENT_ID_REGEX.test(cleaned);
+};
+
+export const isUsingCustomOAuthClientId = (): boolean => {
+  try {
+    const custom = localStorage.getItem(CUSTOM_OAUTH_CLIENT_KEY);
+    return !!(custom && isValidOAuthClientId(custom));
+  } catch {
+    return false;
+  }
+};
 
 export const getActiveOAuthClientId = (): string => {
   try {
-    const custom = localStorage.getItem('ubyport_custom_oauth_client_id');
-    if (custom && custom.trim()) return custom.trim();
+    const rawCustom = localStorage.getItem(CUSTOM_OAUTH_CLIENT_KEY);
+    if (rawCustom && rawCustom.trim()) {
+      const cleaned = sanitizeOAuthClientId(rawCustom);
+      if (isValidOAuthClientId(cleaned)) {
+        return cleaned;
+      }
+      // Odstranit poškozené / neplatné klientské ID, aby nezpůsobovalo chybu 400 invalid_request
+      localStorage.removeItem(CUSTOM_OAUTH_CLIENT_KEY);
+    }
   } catch {}
-  return OAUTH_CLIENT_ID;
+  return sanitizeOAuthClientId(OAUTH_CLIENT_ID);
 };
 
 export const setCustomOAuthClientId = (clientId: string): void => {
+  const cleaned = sanitizeOAuthClientId(clientId);
+  if (!cleaned) {
+    try {
+      localStorage.removeItem(CUSTOM_OAUTH_CLIENT_KEY);
+    } catch {}
+    return;
+  }
+
+  if (!isValidOAuthClientId(cleaned)) {
+    throw new Error(
+      'Neplatný formát OAuth Client ID. Musí mít tvar např. 123456789-xxxx.apps.googleusercontent.com.'
+    );
+  }
+
   try {
-    if (!clientId || !clientId.trim()) {
-      localStorage.removeItem('ubyport_custom_oauth_client_id');
-    } else {
-      localStorage.setItem('ubyport_custom_oauth_client_id', clientId.trim());
-    }
+    localStorage.setItem(CUSTOM_OAUTH_CLIENT_KEY, cleaned);
   } catch {}
 };
 
@@ -49,11 +87,14 @@ export const setCustomOAuthClientId = (clientId: string): void => {
  * a Identity Toolkit jej odmítne s chybou auth/api-keys-are-not-supported-by-this-api!
  */
 export const getFirebaseApiKey = (): string => {
+  if (rawConfig.apiKey && rawConfig.apiKey.trim()) {
+    return rawConfig.apiKey.trim();
+  }
   try {
     const custom = localStorage.getItem('ubyport_firebase_api_key');
     if (custom && custom.trim()) return custom.trim();
   } catch {}
-  return rawConfig.apiKey || '';
+  return '';
 };
 
 export const hasFirebaseApiKey = (): boolean => {
@@ -61,14 +102,35 @@ export const hasFirebaseApiKey = (): boolean => {
   return !!(k && k.trim());
 };
 
+let initializedFirebaseApiKey: string | null = null;
+
+export const resetFirebaseApps = async (): Promise<void> => {
+  const existing = getApps();
+  if (existing.length > 0) {
+    await Promise.all(
+      existing.map(app =>
+        deleteApp(app).catch(() => {
+          // ignore cleanup failure
+        })
+      )
+    );
+  }
+  initializedFirebaseApiKey = null;
+};
+
 export const setFirebaseApiKey = (key: string): void => {
+  const trimmed = (key || '').trim();
   try {
-    if (!key || !key.trim()) {
+    if (!trimmed) {
       localStorage.removeItem('ubyport_firebase_api_key');
     } else {
-      localStorage.setItem('ubyport_firebase_api_key', key.trim());
+      localStorage.setItem('ubyport_firebase_api_key', trimmed);
     }
   } catch {}
+
+  if (initializedFirebaseApiKey !== trimmed) {
+    void resetFirebaseApps();
+  }
 };
 
 /**
@@ -85,39 +147,38 @@ export const WORKSPACE_SCOPES = [
 export const OAUTH_SCOPES = WORKSPACE_SCOPES.join(' ');
 
 let cachedAccessToken: string | null = null;
+let isSigningIn = false;
 let currentUserInstance: User | null = null;
 let authStateListeners: ((user: User | null) => void)[] = [];
 
-// Obnovení uložené relace ze sessionStorage a localStorage
+// Vyčistit případný starý token z úložišť (přístupový token držíme pouze v paměti)
 try {
-  const savedUser = localStorage.getItem('ubyport_google_user');
-  if (savedUser) {
-    currentUserInstance = JSON.parse(savedUser);
-  }
-  const savedToken = sessionStorage.getItem('ubyport_google_token');
-  if (savedToken) {
-    cachedAccessToken = savedToken;
-  }
+  sessionStorage.removeItem('ubyport_google_token');
 } catch {
   // safe fallback
 }
 
+export const clearStoredAccessToken = (): void => {
+  cachedAccessToken = null;
+};
+
 /**
- * Inicializace Firebase App s ověřeným klíčem
+ * Inicializace Firebase App s aktuálně ověřeným klíčem
  */
-export const getFirebaseApp = () => {
+export const getFirebaseApp = (): FirebaseApp => {
   const existing = getApps();
   const apiKey = getFirebaseApiKey();
-  
-  if (existing.length > 0) {
+
+  if (existing.length > 0 && initializedFirebaseApiKey === apiKey) {
     return existing[0];
   }
-  
+
   const config = {
     ...rawConfig,
     apiKey: apiKey || rawConfig.apiKey || ''
   };
-  return initializeApp(config);
+  initializedFirebaseApiKey = config.apiKey;
+  return existing.length > 0 ? existing[0] : initializeApp(config);
 };
 
 export const getFirebaseAuth = () => {
@@ -133,7 +194,7 @@ export const getGoogleAuthProvider = () => {
 };
 
 /**
- * Dynamicky zajistí načtení Google Identity Services (GSI) knihovny pro alternativní přímé OAuth
+ * Dynamicky zajistí načtení Google Identity Services (GSI) knihovny pro přímé OAuth2
  */
 export const ensureGsiClient = (): Promise<any> => {
   return new Promise((resolve, reject) => {
@@ -146,10 +207,43 @@ export const ensureGsiClient = (): Promise<any> => {
       return;
     }
 
-    const existingScript = document.getElementById('gsi-client-script') as HTMLScriptElement;
+    let settled = false;
+    const finishOk = () => {
+      if (settled) return;
+      const oauth2 = (window as any).google?.accounts?.oauth2;
+      if (oauth2) {
+        settled = true;
+        clearInterval(pollTimer);
+        clearTimeout(timeoutTimer);
+        resolve(oauth2);
+      }
+    };
+
+    const finishErr = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(pollTimer);
+      clearTimeout(timeoutTimer);
+      reject(err);
+    };
+
+    // Krátký polling pro případ, že script z index.html už doběhl před připojením listeneru
+    const pollTimer = window.setInterval(finishOk, 50);
+    const timeoutTimer = window.setTimeout(() => {
+      finishErr(
+        new Error('Časový limit pro načtení Google Identity Services vypršel. Zkontrolujte připojení nebo blokátor reklam.')
+      );
+    }, 10000);
+
+    const existingScript =
+      (document.getElementById('gsi-client-script') as HTMLScriptElement | null) ||
+      (document.querySelector('script[src*="accounts.google.com/gsi/client"]') as HTMLScriptElement | null);
+
     if (existingScript) {
-      existingScript.addEventListener('load', () => resolve((window as any).google?.accounts?.oauth2));
-      existingScript.addEventListener('error', (e) => reject(e));
+      existingScript.addEventListener('load', finishOk);
+      existingScript.addEventListener('error', () =>
+        finishErr(new Error('Nepodařilo se načíst knihovnu Google Identity Services.'))
+      );
       return;
     }
 
@@ -158,38 +252,75 @@ export const ensureGsiClient = (): Promise<any> => {
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
     script.defer = true;
-    script.onload = () => resolve((window as any).google?.accounts?.oauth2);
-    script.onerror = () => reject(new Error('Nepodařilo se načíst knihovnu Google Identity Services.'));
+    script.onload = finishOk;
+    script.onerror = () =>
+      finishErr(new Error('Nepodařilo se načíst knihovnu Google Identity Services.'));
     document.head.appendChild(script);
   });
 };
 
 /**
- * Přímé Google OAuth2 přihlášení (GIS) – pro případ, že uživatel preferuje přímé OAuth před Firebase
+ * Přímé Google OAuth2 přihlášení (GIS) – s kontrolou formátu Client ID a kontextu okna
  */
 export const signInWithGsi = async (): Promise<{ user: User; accessToken: string }> => {
+  if (typeof window !== 'undefined') {
+    const origin = window.location.origin;
+    if (!origin || origin === 'null' || !/^https?:\/\//i.test(origin)) {
+      const err: any = new Error(
+        'OAuth2 nelze spustit v omezeném nebo sandboxovaném rámci (neplatný původ okna). Otevřete prosím aplikaci v samostatném okně prohlížeče.'
+      );
+      err.code = 'invalid_origin_context';
+      throw err;
+    }
+  }
+
+  const clientId = getActiveOAuthClientId();
+  if (!isValidOAuthClientId(clientId)) {
+    const err: any = new Error(
+      'Zadané OAuth Client ID nemá správný formát (*.apps.googleusercontent.com).'
+    );
+    err.code = 'invalid_client_id';
+    throw err;
+  }
+
   const oauth2 = await ensureGsiClient();
   if (!oauth2) {
     throw new Error('Knihovna Google OAuth2 není v prohlížeči dostupná.');
   }
 
+  const scopeString = WORKSPACE_SCOPES.map(s => s.trim()).filter(Boolean).join(' ');
+
   return new Promise((resolve, reject) => {
     try {
       const client = oauth2.initTokenClient({
-        client_id: getActiveOAuthClientId(),
-        scope: OAUTH_SCOPES,
+        client_id: clientId,
+        scope: scopeString,
+        ux_mode: 'popup',
         callback: async (tokenResponse: any) => {
-          if (tokenResponse.error) {
+          if (tokenResponse?.error) {
             console.error('GIS Error callback:', tokenResponse);
-            const errCode = tokenResponse.error;
-            let msg = tokenResponse.error_description || tokenResponse.error || 'Přihlášení ke Google účtu bylo zrušeno nebo selhalo.';
+            const errCode = String(tokenResponse.error);
+            let msg =
+              tokenResponse.error_description ||
+              tokenResponse.error ||
+              'Přihlášení ke Google účtu bylo zrušeno nebo selhalo.';
+
             if (errCode === 'popup_closed_by_user') {
               const err: any = new Error('Okno pro přihlášení k účtu Google bylo zavřeno.');
               err.code = 'auth/popup-closed-by-user';
               reject(err);
               return;
-            } else if (errCode === 'access_denied') {
-              msg = 'Přístup k účtu Google a Google Docs byl zamítnut.';
+            }
+            if (errCode === 'access_denied') {
+              msg = 'Přístup k účtu Google a Google Disku byl uživatelem zamítnut.';
+            } else if (
+              errCode === 'invalid_request' ||
+              errCode === 'redirect_uri_mismatch' ||
+              errCode === 'origin_mismatch' ||
+              errCode === 'invalid_client' ||
+              errCode === 'unauthorized_client'
+            ) {
+              msg = `Chyba OAuth2 (${errCode}): Tento webový původ nebo Client ID není povolen v Google Cloud Console.`;
             }
             const err: any = new Error(msg);
             err.code = errCode;
@@ -197,15 +328,12 @@ export const signInWithGsi = async (): Promise<{ user: User; accessToken: string
             return;
           }
 
-          if (!tokenResponse.access_token) {
+          if (!tokenResponse?.access_token) {
             reject(new Error('Google nevrátil přístupový token. Zkuste to prosím znovu.'));
             return;
           }
 
           cachedAccessToken = tokenResponse.access_token;
-          try {
-            sessionStorage.setItem('ubyport_google_token', cachedAccessToken!);
-          } catch {}
 
           let user: User = {
             uid: `user_${Date.now()}`,
@@ -239,13 +367,33 @@ export const signInWithGsi = async (): Promise<{ user: User; accessToken: string
         },
         error_callback: (err: any) => {
           console.error('GIS token client error:', err);
-          const customErr: any = new Error(err?.message || 'Chyba při komunikaci s Google Identity Services.');
+          const errType = err?.type || '';
+
+          if (errType === 'popup_failed_to_open') {
+            const blockedErr: any = new Error(
+              'Prohlížeč zablokoval vyskakovací okno Google OAuth2. Povolte prosím vyskakovací okna pro tuto stránku.'
+            );
+            blockedErr.code = 'auth/popup-blocked';
+            reject(blockedErr);
+            return;
+          }
+
+          if (errType === 'popup_closed') {
+            const closedErr: any = new Error('Okno pro přihlášení k účtu Google bylo zavřeno.');
+            closedErr.code = 'auth/popup-closed-by-user';
+            reject(closedErr);
+            return;
+          }
+
+          const customErr: any = new Error(
+            err?.message || 'Chyba OAuth2 při komunikaci s Google Identity Services.'
+          );
           customErr.code = 'origin_mismatch';
           reject(customErr);
         }
       });
 
-      client.requestAccessToken({ prompt: 'consent' });
+      client.requestAccessToken({ prompt: 'select_account' });
     } catch (err: any) {
       console.error('Chyba při spuštění Google přihlášení:', err);
       reject(err);
@@ -267,20 +415,26 @@ export const initAuth = (
       const auth = getFirebaseAuth();
       unsubscribeFirebase = onAuthStateChanged(auth, (fbUser) => {
         if (fbUser) {
-          currentUserInstance = fbUser;
-          onAuthChange(fbUser);
-        } else if (!cachedAccessToken) {
+          if (cachedAccessToken) {
+            currentUserInstance = fbUser;
+            onAuthChange(fbUser);
+          } else if (!isSigningIn) {
+            cachedAccessToken = null;
+            currentUserInstance = null;
+            onAuthChange(null);
+          }
+        } else {
+          cachedAccessToken = null;
           currentUserInstance = null;
           onAuthChange(null);
         }
       });
-    } catch {}
-  } else {
-    if (currentUserInstance) {
-      onAuthChange(currentUserInstance);
-    } else {
+    } catch {
+      cachedAccessToken = null;
       onAuthChange(null);
     }
+  } else {
+    onAuthChange(cachedAccessToken && currentUserInstance ? currentUserInstance : null);
   }
 
   return () => {
@@ -294,7 +448,12 @@ export const initAuth = (
  */
 export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Promise<{ user: User; accessToken: string }> => {
   if (method === 'gis') {
-    return await signInWithGsi();
+    isSigningIn = true;
+    try {
+      return await signInWithGsi();
+    } finally {
+      isSigningIn = false;
+    }
   }
 
   const apiKey = getFirebaseApiKey();
@@ -305,6 +464,12 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
   }
 
   try {
+    isSigningIn = true;
+    // Pokud se mezitím změnil API klíč, zrušíme předchozí cachovanou Firebase instanci
+    if (getApps().length > 0 && initializedFirebaseApiKey !== apiKey) {
+      await resetFirebaseApps();
+    }
+
     const auth = getFirebaseAuth();
     const provider = getGoogleAuthProvider();
 
@@ -313,7 +478,7 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     const accessToken = credential?.accessToken;
 
     if (!accessToken) {
-      throw new Error('Firebase Auth nevrátil přístupový OAuth token pro Google Docs a Google Disk.');
+      throw new Error('Firebase Auth nevrátil přístupový OAuth token pro Google Disk a Google Sheets.');
     }
 
     const user: User = {
@@ -327,7 +492,6 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     currentUserInstance = user;
 
     try {
-      sessionStorage.setItem('ubyport_google_token', accessToken);
       localStorage.setItem('ubyport_google_user', JSON.stringify(user));
     } catch {}
 
@@ -339,9 +503,21 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     const errMsg = firebaseErr.message || '';
 
     // Uživatel zavřel okno
-    if (errCode === 'auth/popup-closed-by-user' || errMsg.includes('popup-closed-by-user') || errMsg.includes('closed by user')) {
+    if (
+      errCode === 'auth/popup-closed-by-user' ||
+      errCode === 'auth/cancelled-popup-request' ||
+      errMsg.includes('popup-closed-by-user') ||
+      errMsg.includes('closed by user')
+    ) {
       const err: any = new Error('Přihlašovací okno bylo zavřeno.');
       err.code = 'auth/popup-closed-by-user';
+      throw err;
+    }
+
+    // Zablokované vyskakovací okno
+    if (errCode === 'auth/popup-blocked' || errMsg.includes('popup-blocked')) {
+      const err: any = new Error('Prohlížeč zablokoval vyskakovací okno pro přihlášení. Povolte prosím vyskakovací okna.');
+      err.code = 'auth/popup-blocked';
       throw err;
     }
 
@@ -349,6 +525,13 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain') || errMsg.includes('unauthorized domain')) {
       const err: any = new Error(`Doména "${typeof window !== 'undefined' ? window.location.hostname : ''}" není povolena ve Firebase Authentication.`);
       err.code = 'auth/unauthorized-domain';
+      throw err;
+    }
+
+    // Nepovolený Google provider ve Firebase Console
+    if (errCode === 'auth/operation-not-allowed') {
+      const err: any = new Error('Přihlášení přes Google není ve Firebase Console -> Authentication -> Sign-in method zapnuto.');
+      err.code = 'auth/operation-not-allowed';
       throw err;
     }
 
@@ -364,6 +547,8 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     }
 
     throw firebaseErr;
+  } finally {
+    isSigningIn = false;
   }
 };
 
