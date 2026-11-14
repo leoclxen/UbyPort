@@ -36,7 +36,8 @@ import {
   AlertCircle,
   Globe,
   Loader2,
-  Search
+  Search,
+  Link2
 } from 'lucide-react';
 import { Property, Guest, PRAGUE_DISTRICTS } from './types';
 import {
@@ -68,6 +69,13 @@ import {
   saveModelToSheet,
   SpreadsheetInfo
 } from './lib/googleSheets';
+import {
+  parseGoogleSheetUrl,
+  loadFromPublicGoogleSheet,
+  downloadExcelWorkbook,
+  downloadCsvExport,
+  buildGoogleSheetsTsv
+} from './lib/publicSheets';
 import {
   runClientGeminiOcr,
   GeminiModelInfo,
@@ -361,6 +369,21 @@ export default function App() {
     safeStorage.getItem('ubyport_sheet_id') || ''
   );
   const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
+
+  // Zero-Cloud Google Sheet Link & Export State
+  const [publicSheetUrl, setPublicSheetUrl] = useState<string>(
+    safeStorage.getItem('ubyport_public_sheet_url') || ''
+  );
+  const [publicSheetInput, setPublicSheetInput] = useState<string>(
+    safeStorage.getItem('ubyport_public_sheet_url') || ''
+  );
+  const [publicSheetLastSync, setPublicSheetLastSync] = useState<string>(
+    safeStorage.getItem('ubyport_public_sheet_last_sync') || ''
+  );
+  const [isLoadingPublicSheet, setIsLoadingPublicSheet] = useState<boolean>(false);
+  const [publicSheetError, setPublicSheetError] = useState<string | null>(null);
+  const [isSheetsModalOpen, setIsSheetsModalOpen] = useState<boolean>(false);
+  const [sheetsModalTab, setSheetsModalTab] = useState<'link' | 'oauth'>('link');
 
   // Modals State
   const [isPropModalOpen, setIsPropModalOpen] = useState<boolean>(false);
@@ -720,6 +743,125 @@ export default function App() {
       showToast('Byl jste odhlášen.', 'info');
     } catch (err: any) {
       showToast(`Chyba při odhlášení: ${err.message}`, 'warning');
+    }
+  };
+
+  // Zero-Cloud Google Sheet Link Loader & Instant Exports
+  const handleLoadFromPublicSheet = async (urlOverride?: string) => {
+    const rawInput = (typeof urlOverride === 'string' ? urlOverride : publicSheetInput).trim();
+    if (!rawInput) {
+      setPublicSheetError('Vložte prosím odkaz na váš Google Sheet.');
+      showToast('Vložte prosím odkaz na Google Sheet.', 'warning');
+      return;
+    }
+
+    const parsed = parseGoogleSheetUrl(rawInput);
+    if (!parsed) {
+      const msg = 'Neplatný odkaz na Google Sheet. Zkopírujte celou URL z adresního řádku.';
+      setPublicSheetError(msg);
+      showToast(msg, 'warning');
+      return;
+    }
+
+    try {
+      setIsLoadingPublicSheet(true);
+      setPublicSheetError(null);
+      const result = await loadFromPublicGoogleSheet(rawInput, activePropertyId);
+
+      const nextProps = result.properties.length > 0 ? result.properties : properties;
+      const nextGuests = result.guests.length > 0 ? result.guests : guests;
+      const nextActiveId = nextProps.find(p => p.id === activePropertyId)?.id || nextProps[0]?.id || '';
+
+      if (result.properties.length > 0) setProperties(result.properties);
+      if (result.guests.length > 0) setGuests(result.guests);
+      if (nextActiveId) setActivePropertyId(nextActiveId);
+
+      if (result.apiKey) {
+        setUserApiKey(result.apiKey);
+        safeStorage.setItem('ubyport_user_api_key', result.apiKey);
+        refreshModelsList(result.apiKey);
+      }
+      if (result.preferredModel) {
+        setActiveModelName(result.preferredModel);
+        safeStorage.setItem('ubyport_model_pref', result.preferredModel);
+      }
+
+      if (result.properties.length > 0 || result.guests.length > 0) {
+        persistLocalState(nextProps, nextGuests, nextActiveId);
+        await syncServerApi('/api/import/yaml', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            yamlContent: jsyaml.dump({
+              meta: {
+                version: '3.1',
+                lastUpdated: new Date().toISOString(),
+                activePropertyId: nextActiveId
+              },
+              properties: nextProps,
+              guests: nextGuests
+            })
+          })
+        });
+      }
+
+      const nowIso = new Date().toISOString();
+      setPublicSheetUrl(result.canonicalUrl);
+      setPublicSheetInput(result.canonicalUrl);
+      setPublicSheetLastSync(nowIso);
+      safeStorage.setItem('ubyport_public_sheet_url', result.canonicalUrl);
+      safeStorage.setItem('ubyport_public_sheet_last_sync', nowIso);
+
+      if (result.properties.length === 0 && result.guests.length === 0) {
+        showToast('Sešit propojen, ale nebyly v něm nalezeny žádné řádky hostů ani ubytování.', 'info');
+      } else {
+        showToast(
+          `Načteno z odkazu: ${result.properties.length} ubytování, ${result.guests.length} hostů.`,
+          'success'
+        );
+      }
+    } catch (err: any) {
+      const msg = err?.message || 'Nepodařilo se načíst Google Sheet.';
+      setPublicSheetError(msg);
+      showToast(msg, 'warning');
+    } finally {
+      setIsLoadingPublicSheet(false);
+    }
+  };
+
+  const handleDisconnectPublicSheet = () => {
+    setPublicSheetUrl('');
+    setPublicSheetInput('');
+    setPublicSheetLastSync('');
+    setPublicSheetError(null);
+    safeStorage.removeItem('ubyport_public_sheet_url');
+    safeStorage.removeItem('ubyport_public_sheet_last_sync');
+    showToast('Odkaz na Google Sheet byl odpojen (lokální data zůstala zachována).', 'info');
+  };
+
+  const handleDownloadExcelWorkbook = () => {
+    downloadExcelWorkbook(properties, guests);
+    showToast('Excel sešit (.xls se 3 listy) byl stažen.', 'success');
+  };
+
+  const handleDownloadCsv = (target: 'guests' | 'properties') => {
+    downloadCsvExport(target, properties, guests);
+    showToast(
+      target === 'guests' ? 'CSV seznam hostů byl stažen.' : 'CSV seznam ubytování byl stažen.',
+      'success'
+    );
+  };
+
+  const handleCopySheetsTsv = async (target: 'guests' | 'properties') => {
+    try {
+      const tsv = buildGoogleSheetsTsv(target, properties, guests);
+      await navigator.clipboard.writeText(tsv);
+      showToast(
+        'Zkopírováno! Otevřete Google Sheet, klikněte na buňku A1 a vložte (Ctrl+V).',
+        'success'
+      );
+    } catch {
+      showToast('Nepodařilo se zkopírovat do schránky.', 'warning');
     }
   };
 
@@ -1681,14 +1823,11 @@ export default function App() {
             {currentUser ? (
               <button
                 onClick={() => {
-                  if (connectedSheet) {
-                    window.open(connectedSheet.url, '_blank');
-                  } else {
-                    handleGoogleLogin();
-                  }
+                  setSheetsModalTab('oauth');
+                  setIsSheetsModalOpen(true);
                 }}
-                title={connectedSheet ? `Otevřít sešit: ${connectedSheet.title}` : 'Google Disk připojen'}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900 tap-active cursor-pointer text-xs font-semibold"
+                title={connectedSheet ? `Připojen sešit: ${connectedSheet.title}` : 'Google Disk připojen přes účet'}
+                className="flex items-center gap-1 px-2.5 min-h-[36px] rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900 tap-active cursor-pointer text-xs font-semibold whitespace-nowrap shrink-0"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <span className="text-[11px] font-medium">Disk</span>
@@ -1697,14 +1836,32 @@ export default function App() {
                   <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping shrink-0" />
                 )}
               </button>
+            ) : publicSheetUrl ? (
+              <button
+                onClick={() => {
+                  setSheetsModalTab('link');
+                  setIsSheetsModalOpen(true);
+                }}
+                title="Propojeno přes odkaz Google Sheet (bez přihlášení)"
+                className="flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg bg-sky-950/80 border border-sky-500/40 text-sky-300 hover:bg-sky-900 tap-active cursor-pointer text-xs font-semibold whitespace-nowrap shrink-0"
+              >
+                <Link2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="text-[11px] font-semibold">Sheets: Odkaz</span>
+                {isLoadingPublicSheet && (
+                  <Loader2 className="w-3 h-3 animate-spin text-sky-400 shrink-0" />
+                )}
+              </button>
             ) : (
               <button
-                onClick={() => handleGoogleLogin()}
-                title="Přihlásit se k účtu Google pro synchronizaci a ukládání na Google Disk"
-                className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 tap-active cursor-pointer text-xs font-semibold"
+                onClick={() => {
+                  setSheetsModalTab('link');
+                  setIsSheetsModalOpen(true);
+                }}
+                title="Propojit Google Sheets přes odkaz nebo exportovat Excel/CSV (bez Google Cloud a Firebase)"
+                className="flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg bg-amber-500/10 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 tap-active cursor-pointer text-xs font-semibold whitespace-nowrap shrink-0"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="text-[11px] font-bold text-amber-300">Disk: Nepřipojeno</span>
+                <span className="text-[11px] font-bold text-amber-300">Sheets / Excel</span>
               </button>
             )}
 
@@ -2482,6 +2639,71 @@ export default function App() {
                   <span>ubyport.policie.cz</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
+              </div>
+            </div>
+
+            {/* GOOGLE SHEETS & EXCEL EXPORT CARD (ZERO CLOUD / ZERO FIREBASE) */}
+            <div className="bg-slate-900/90 rounded-3xl border border-slate-800 p-5 space-y-3.5 shadow-xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3 gap-2">
+                <div>
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-emerald-400">
+                    Bez Google Cloud a Firebase
+                  </span>
+                  <h2 className="text-base font-bold text-white">Export pro Google Sheets & Excel</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSheetsModalTab('link');
+                    setIsSheetsModalOpen(true);
+                  }}
+                  className="px-3 min-h-[40px] bg-slate-800 hover:bg-slate-750 border border-slate-700 text-sky-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 tap-active cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>{publicSheetUrl ? 'Spravovat odkaz' : 'Načíst z odkazu'}</span>
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Stáhněte kompletní sešit pro Excel/Google Sheets nebo jedním kliknutím zkopírujte tabulku hostů pro okamžité vložení (Ctrl+V) do Google Sheets.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadExcelWorkbook}
+                  className="min-h-[44px] py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Stáhnout Excel (.xls · 3 listy)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCopySheetsTsv('guests')}
+                  className="min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
+                >
+                  <Copy className="w-4 h-4" />
+                  <span>Kopírovat hosty pro Sheets</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadCsv('guests')}
+                  className="min-h-[44px] py-2 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-slate-400" />
+                  <span>CSV Hosté ({guests.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadCsv('properties')}
+                  className="min-h-[44px] py-2 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-slate-400" />
+                  <span>CSV Ubytování ({properties.length})</span>
+                </button>
               </div>
             </div>
           </div>
@@ -3449,62 +3671,90 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Google Workspace Info */}
-              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-2">
+              {/* Google Sheets Sync Info (Zero-Cloud Link Primary + Optional Firebase/OAuth Fallback) */}
+              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-300 flex items-center gap-1.5">
                     <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
                     Google Sheets synchronizace
                   </span>
                   {currentUser ? (
-                    <span className="text-[10px] text-emerald-400 font-bold">Připojeno</span>
+                    <span className="text-[10px] text-emerald-400 font-bold">Připojeno (OAuth)</span>
+                  ) : publicSheetUrl ? (
+                    <span className="text-[10px] text-sky-400 font-bold">Propojeno (Odkaz)</span>
                   ) : (
                     <span className="text-[10px] text-slate-500">Nepřipojeno</span>
                   )}
                 </div>
 
-                {currentUser ? (
-                  <div className="space-y-1.5 text-[11px]">
-                    <p className="text-slate-300 truncate">Účet: {currentUser.email}</p>
-                    {connectedSheet && (
-                      <a
-                        href={connectedSheet.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-blue-400 hover:underline flex items-center gap-1 font-mono truncate"
-                      >
-                        <span>{connectedSheet.title}</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSettingsModalOpen(false);
+                      setSheetsModalTab('link');
+                      setIsSheetsModalOpen(true);
+                    }}
+                    className="flex-1 min-h-[40px] py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>{publicSheetUrl ? 'Odkaz na Sheet & Export' : 'Propojit přes odkaz (bez cloudu)'}</span>
+                  </button>
+                  {publicSheetUrl && (
                     <button
                       type="button"
-                      onClick={handleGoogleLogout}
-                      className="text-rose-400 hover:underline text-[10px] font-semibold block pt-1"
+                      onClick={() => handleLoadFromPublicSheet(publicSheetUrl)}
+                      disabled={isLoadingPublicSheet}
+                      className="min-h-[40px] py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 rounded-xl text-xs font-semibold tap-active cursor-pointer"
                     >
-                      Odhlásit Google účet
+                      Obnovit
                     </button>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleGoogleLogin('firebase')}
-                      className="w-full py-2 px-3 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
-                    >
-                      Přihlásit přes Firebase
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleGoogleLogin('gis')}
-                      className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                    >
-                      Přímé OAuth2 (GIS)
-                    </button>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                  <p className="text-[10px] text-slate-400 font-semibold">Volitelná záloha (Firebase / Google Cloud OAuth2):</p>
+                  {currentUser ? (
+                    <div className="space-y-1.5 text-[11px]">
+                      <p className="text-slate-300 truncate">Účet: {currentUser.email}</p>
+                      {connectedSheet && (
+                        <a
+                          href={connectedSheet.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-400 hover:underline flex items-center gap-1 font-mono truncate"
+                        >
+                          <span>{connectedSheet.title}</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleGoogleLogout}
+                        className="text-rose-400 hover:underline text-[10px] font-semibold block pt-1 cursor-pointer"
+                      >
+                        Odhlásit Google účet
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleGoogleLogin('firebase')}
+                        className="w-full py-2 px-3 bg-emerald-800/80 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
+                      >
+                        Přihlásit přes Firebase
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleGoogleLogin('gis')}
+                        className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                      >
+                        Přímé OAuth2 (GIS)
+                      </button>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="text-slate-400">Firebase Web API klíč:</span>
                     <button
@@ -4075,6 +4325,308 @@ export default function App() {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 11: UNIFIED GOOGLE SHEETS LINK & EXPORT MODAL (+ OPTIONAL OAUTH FALLBACK) */}
+      {isSheetsModalOpen && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-4 sm:p-5 space-y-4 text-xs shadow-2xl my-auto max-h-[92vh] overflow-y-auto no-scrollbar">
+            {/* Header */}
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3 gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 shrink-0">
+                  <FileSpreadsheet className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-white text-sm sm:text-base">
+                    Google Sheets &amp; Excel
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Načítání přes odkaz a okamžitý export bez Google Cloud či Firebase
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSheetsModalOpen(false)}
+                className="text-slate-400 hover:text-white p-2 rounded-lg hover:bg-slate-800 tap-active shrink-0 cursor-pointer min-h-[40px] min-w-[40px] flex items-center justify-center"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Mode Switcher */}
+            <div className="grid grid-cols-2 gap-1 p-1 bg-slate-950 rounded-2xl border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setSheetsModalTab('link')}
+                className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                  sheetsModalTab === 'link'
+                    ? 'bg-slate-800 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Odkaz &amp; Export (Bez cloudu)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSheetsModalTab('oauth')}
+                className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                  sheetsModalTab === 'oauth'
+                    ? 'bg-slate-800 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Firebase / OAuth2 (Záloha)
+              </button>
+            </div>
+
+            {sheetsModalTab === 'link' ? (
+              <div className="space-y-4">
+                {/* 1. Load from Public Google Sheet Link */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs font-bold text-white">
+                      1. Načíst data z odkazu na Google Sheet
+                    </label>
+                    {publicSheetUrl && (
+                      <a
+                        href={publicSheetUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-sky-400 hover:underline flex items-center gap-1 font-semibold whitespace-nowrap shrink-0"
+                      >
+                        <span>Otevřít sešit</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    V Google Sheets klikněte na <strong className="text-slate-200">Sdílet → Kdokoliv s odkazem (Čtenář)</strong> a vložte odkaz níže. Aplikace načte listy <code>Ubytovani</code>, <code>Hoste</code> i <code>Nastaveni</code> bez přihlašování.
+                  </p>
+
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="url"
+                      value={publicSheetInput}
+                      onChange={e => {
+                        setPublicSheetInput(e.target.value);
+                        if (publicSheetError) setPublicSheetError(null);
+                      }}
+                      placeholder="https://docs.google.com/spreadsheets/d/..."
+                      className="flex-1 min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleLoadFromPublicSheet()}
+                      disabled={isLoadingPublicSheet}
+                      className="min-h-[44px] px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {isLoadingPublicSheet ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
+                      <span>{publicSheetUrl ? 'Obnovit / Načíst' : 'Načíst ze Sheetu'}</span>
+                    </button>
+                  </div>
+
+                  {publicSheetError && (
+                    <div className="p-3 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-[11px] flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <span>{publicSheetError}</span>
+                    </div>
+                  )}
+
+                  {publicSheetUrl && (
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 pt-0.5">
+                      <span>
+                        Naposledy načteno:{' '}
+                        <strong className="text-slate-200 tabular-nums">
+                          {publicSheetLastSync
+                            ? new Date(publicSheetLastSync).toLocaleString('cs-CZ')
+                            : 'uloženo'}
+                        </strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleDisconnectPublicSheet}
+                        className="text-rose-400 hover:underline font-semibold cursor-pointer"
+                      >
+                        Odpojit odkaz
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-slate-800 pt-3.5 space-y-2.5">
+                  <div>
+                    <h4 className="text-xs font-bold text-white">
+                      2. Uložit data do Excelu nebo Google Sheets (1 kliknutím)
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Stáhněte kompletní sešit nebo zkopírujte tabulku a vložte ji přímo do buňky <code>A1</code> v Google Sheets.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDownloadExcelWorkbook}
+                      className="min-h-[44px] px-3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-4 h-4" />
+                      <span>Stáhnout Excel (.xls · 3 listy)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCopySheetsTsv('guests')}
+                      className="min-h-[44px] px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
+                    >
+                      <Copy className="w-4 h-4" />
+                      <span>Kopírovat hosty pro Sheets</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadCsv('guests')}
+                      className="min-h-[44px] px-3 py-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
+                    >
+                      <FileDown className="w-3.5 h-3.5 text-slate-400" />
+                      <span>CSV Hosté ({guests.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadCsv('properties')}
+                      className="min-h-[44px] px-3 py-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
+                    >
+                      <FileDown className="w-3.5 h-3.5 text-slate-400" />
+                      <span>CSV Ubytování ({properties.length})</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* Tab 2: Optional Firebase / OAuth2 Fallback */
+              <div className="space-y-3">
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Volitelná přímá synchronizace přes Google účet pro automatický obousměrný zápis (vyžaduje konfiguraci Firebase nebo OAuth2 Client ID).
+                </p>
+
+                {currentUser ? (
+                  <div className="bg-slate-950 p-3.5 rounded-2xl border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="font-bold text-white text-xs">{currentUser.displayName || 'Přihlášený účet'}</p>
+                        <p className="text-[11px] text-slate-400">{currentUser.email}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleGoogleLogout}
+                        className="min-h-[40px] px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 border border-rose-500/40 text-rose-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                      >
+                        Odhlásit
+                      </button>
+                    </div>
+                    {connectedSheet && (
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        <a
+                          href={connectedSheet.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex-1 min-h-[44px] px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 tap-active"
+                        >
+                          <span>Otevřít {connectedSheet.title}</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => triggerSheetSync()}
+                          disabled={isSyncingSheet}
+                          className="min-h-[44px] px-3 py-2 bg-slate-800 hover:bg-slate-750 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 tap-active cursor-pointer"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
+                          <span>Synchronizovat</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSheetsModalOpen(false);
+                        handleGoogleLogin('firebase');
+                      }}
+                      className="min-h-[44px] py-2.5 px-3 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
+                    >
+                      Přihlásit přes Firebase
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSheetsModalOpen(false);
+                        handleGoogleLogin('gis');
+                      }}
+                      className="min-h-[44px] py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                    >
+                      Přímé OAuth2 (GIS)
+                    </button>
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSheetsModalOpen(false);
+                      setIsFirebaseKeyModalOpen(true);
+                    }}
+                    className="text-sky-400 hover:underline font-semibold cursor-pointer py-1"
+                  >
+                    Firebase Web API klíč
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSheetsModalOpen(false);
+                      setDomainModalType('gis');
+                      setIsDomainModalOpen(true);
+                    }}
+                    className="text-blue-400 hover:underline font-semibold cursor-pointer py-1"
+                  >
+                    OAuth2 Client ID &amp; Původ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSheetsModalOpen(false);
+                      setDomainModalType('firebase');
+                      setIsDomainModalOpen(true);
+                    }}
+                    className="text-amber-400 hover:underline font-semibold cursor-pointer py-1"
+                  >
+                    Autorizované domény
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-1 flex justify-end border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setIsSheetsModalOpen(false)}
+                className="min-h-[44px] px-5 py-2 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
+              >
+                Zavřít
+              </button>
             </div>
           </div>
         </div>
