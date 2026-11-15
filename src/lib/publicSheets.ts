@@ -10,7 +10,6 @@ export interface ParsedSheetUrl {
 export interface PublicSheetLoadResult {
   properties: Property[];
   guests: Guest[];
-  apiKey?: string;
   preferredModel?: string;
   canonicalUrl: string;
   spreadsheetId: string;
@@ -326,7 +325,6 @@ export async function loadFromPublicGoogleSheet(
   const detectedTabs: string[] = [];
   let properties: Property[] = [];
   let guests: Guest[] = [];
-  let apiKey = '';
   let preferredModel = '';
 
   const [ubytRows, hostRows, nastRows, gidRows] = await Promise.all([
@@ -356,7 +354,6 @@ export async function loadFromPublicGoogleSheet(
       for (const row of cand.rows.slice(1)) {
         const k = (row[0] || '').trim();
         const v = (row[1] || '').trim();
-        if (k === 'GEMINI_API_KEY' && v) apiKey = v;
         if (k === 'PREFEROVANY_MODEL' && v) preferredModel = v;
       }
       detectedTabs.push('Nastaveni');
@@ -375,7 +372,6 @@ export async function loadFromPublicGoogleSheet(
   return {
     properties,
     guests,
-    apiKey: apiKey || undefined,
     preferredModel: preferredModel || undefined,
     canonicalUrl: parsed.canonicalUrl,
     spreadsheetId: parsed.spreadsheetId,

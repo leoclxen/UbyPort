@@ -37,7 +37,9 @@ import {
   Globe,
   Loader2,
   Search,
-  Link2
+  Link2,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { Property, Guest, PRAGUE_DISTRICTS } from './types';
 import {
@@ -50,21 +52,20 @@ import {
   isValidOAuthClientId,
   isUsingCustomOAuthClientId,
   clearStoredAccessToken,
-  OAUTH_CLIENT_ID,
   getFirebaseApiKey,
-  setFirebaseApiKey,
+  getFirebaseProjectId,
+  setManualFirebaseConfig,
+  clearManualFirebaseConfig,
   hasFirebaseApiKey,
   User,
-  firebaseProjectId,
-  firebaseAuthSettingsUrl,
-  firebaseGeneralSettingsUrl,
-  googleCloudCredentialsUrl
+  getFirebaseAuthSettingsUrl,
+  getFirebaseGeneralSettingsUrl,
+  getGoogleCloudCredentialsUrl
 } from './lib/googleAuth';
 import {
   findOrCreateAirTaxSpreadsheet,
   loadAllDataFromGoogleSheet,
   syncAllToGoogleSheet,
-  saveApiKeyToSheet,
   saveSettingsToSheet,
   saveModelToSheet,
   SpreadsheetInfo
@@ -352,12 +353,12 @@ export default function App() {
   const [activeModelName, setActiveModelName] = useState<string>(
     safeStorage.getItem('ubyport_model_pref') || 'gemini-2.5-flash'
   );
-  const [userApiKey, setUserApiKey] = useState<string>(
-    safeStorage.getItem('ubyport_user_api_key') ||
-    safeStorage.getItem('airtax_secure_key_blob') ||
-    safeStorage.getItem('airtax_gemini_key') ||
-    safeStorage.getItem('gemini_api_key') || ''
+  // Gemini API klíč držíme výhradně v operační paměti (RAM), nikdy v localStorage/sessionStorage
+  const [userApiKey, setUserApiKey] = useState<string>('');
+  const [keychainAccountName, setKeychainAccountName] = useState<string>(
+    safeStorage.getItem('ubyport_keychain_account') || 'UbyExport Gemini OCR'
   );
+  const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const ocrAbortControllerRef = useRef<AbortController | null>(null);
 
   // Google Workspace & Sheets State
@@ -406,11 +407,10 @@ export default function App() {
   const [isDomainModalOpen, setIsDomainModalOpen] = useState<boolean>(false);
   const [domainModalType, setDomainModalType] = useState<'firebase' | 'gis'>('firebase');
   const [isFirebaseKeyModalOpen, setIsFirebaseKeyModalOpen] = useState<boolean>(false);
+  const [firebaseProjectIdInput, setFirebaseProjectIdInput] = useState<string>(() => getFirebaseProjectId());
   const [firebaseApiKeyInput, setFirebaseApiKeyInput] = useState<string>(() => getFirebaseApiKey());
   const [authMethodChoice, setAuthMethodChoice] = useState<'firebase' | 'gis'>('firebase');
-  const [customOAuthClientId, setCustomOAuthClientIdState] = useState<string>(() => {
-    return safeStorage.getItem('ubyport_custom_oauth_client_id') || '';
-  });
+  const [customOAuthClientId, setCustomOAuthClientIdState] = useState<string>('');
 
   // UNL Import Modal State
   const [isUnlImportModalOpen, setIsUnlImportModalOpen] = useState<boolean>(false);
@@ -555,8 +555,25 @@ export default function App() {
     }
   };
 
-  // 2. Initialize Firebase Auth
+  // 2. Purge legacy persisted secrets & Initialize optional Firebase Auth
   useEffect(() => {
+    const legacySecretKeys = [
+      'ubyport_user_api_key',
+      'airtax_secure_key_blob',
+      'airtax_gemini_key',
+      'gemini_api_key',
+      'ubyport_firebase_api_key',
+      'ubyport_custom_oauth_client_id',
+      'ubyport_google_token',
+      'ubyport_google_user'
+    ];
+    for (const k of legacySecretKeys) {
+      safeStorage.removeItem(k);
+      try {
+        sessionStorage.removeItem(k);
+      } catch {}
+    }
+
     fetchCloudData();
     if (userApiKey && userApiKey.trim()) {
       refreshModelsList(userApiKey.trim());
@@ -590,11 +607,6 @@ export default function App() {
 
       const sheetData = await loadAllDataFromGoogleSheet(token, sheetInfo.id);
 
-      if (sheetData.apiKey && sheetData.apiKey.trim().length > 0) {
-        setUserApiKey(sheetData.apiKey);
-        safeStorage.setItem('ubyport_user_api_key', sheetData.apiKey);
-        refreshModelsList(sheetData.apiKey);
-      }
       if (sheetData.preferredModel) {
         setActiveModelName(sheetData.preferredModel);
         safeStorage.setItem('ubyport_model_pref', sheetData.preferredModel);
@@ -622,13 +634,11 @@ export default function App() {
           })
         });
 
-        const keyMsg = sheetData.apiKey ? ' (včetně Gemini API klíče)' : '';
-        showToast(`Načteno z Google Sheetu: ${sheetData.properties.length} ubytování, ${sheetData.guests.length} hostů${keyMsg}!`, 'success');
+        showToast(`Načteno z Google Sheetu: ${sheetData.properties.length} ubytování, ${sheetData.guests.length} hostů!`, 'success');
       } else if (properties.length > 0 || guests.length > 0) {
         await syncAllToGoogleSheet(token, sheetInfo.id, {
           properties,
           guests,
-          apiKey: userApiKey,
           preferredModel: activeModelName
         });
         showToast('Data byla úspěšně nahrána do nového Google Sheetu!', 'success');
@@ -776,11 +786,6 @@ export default function App() {
       if (result.guests.length > 0) setGuests(result.guests);
       if (nextActiveId) setActivePropertyId(nextActiveId);
 
-      if (result.apiKey) {
-        setUserApiKey(result.apiKey);
-        safeStorage.setItem('ubyport_user_api_key', result.apiKey);
-        refreshModelsList(result.apiKey);
-      }
       if (result.preferredModel) {
         setActiveModelName(result.preferredModel);
         safeStorage.setItem('ubyport_model_pref', result.preferredModel);
@@ -873,7 +878,6 @@ export default function App() {
       await syncAllToGoogleSheet(googleToken, connectedSheet.id, {
         properties: propsToSync || properties,
         guests: guestsToSync || guests,
-        apiKey: userApiKey,
         preferredModel: activeModelName
       });
     } catch (e: any) {
@@ -1687,32 +1691,72 @@ export default function App() {
     }
   };
 
-  // SAVE SETTINGS MODAL
+  // CLEAR API KEY FROM RAM
+  const handleClearApiKeyFromRam = () => {
+    setUserApiKey('');
+    setShowApiKey(false);
+    safeStorage.removeItem('ubyport_user_api_key');
+    safeStorage.removeItem('airtax_secure_key_blob');
+    safeStorage.removeItem('airtax_gemini_key');
+    safeStorage.removeItem('gemini_api_key');
+    showToast('API klíč byl vymazán z operační paměti (RAM).', 'info');
+  };
+
+  // UNLOCK / SAVE API KEY VIA KEYCHAIN / KEEPASS FORM (RAM-ONLY)
+  const handleUnlockKeyFromModal = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = userApiKey.trim();
+    if (!trimmed) {
+      showToast('Zadejte nebo vložte z Klíčenky / KeePassu svůj Gemini API klíč.', 'warning');
+      return;
+    }
+    setUserApiKey(trimmed);
+    setShowApiKey(false);
+    safeStorage.setItem('ubyport_keychain_account', keychainAccountName.trim() || 'UbyExport Gemini OCR');
+    refreshModelsList(trimmed);
+    setIsMissingKeyModalOpen(false);
+    showToast('Klíč odemčen pouze v RAM (na disk prohlížeče se neukládá).', 'success');
+    if (imagePreview) {
+      processImageWithOcr(imagePreview);
+    }
+  };
+
+  // SAVE SETTINGS MODAL (RAM-ONLY KEY + NON-SECRET PREFS)
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    safeStorage.setItem('ubyport_user_api_key', userApiKey.trim());
-    safeStorage.setItem('airtax_secure_key_blob', userApiKey.trim());
+    const trimmedKey = userApiKey.trim();
+    setUserApiKey(trimmedKey);
+    setShowApiKey(false);
+    safeStorage.setItem('ubyport_keychain_account', keychainAccountName.trim() || 'UbyExport Gemini OCR');
     safeStorage.setItem('ubyport_model_pref', activeModelName);
+
+    // Pro jistotu odstraníme případné starší záznamy klíče z úložiště
+    safeStorage.removeItem('ubyport_user_api_key');
+    safeStorage.removeItem('airtax_secure_key_blob');
 
     if (googleToken && connectedSheet) {
       try {
-        await saveSettingsToSheet(googleToken, connectedSheet.id, userApiKey.trim(), activeModelName);
+        await saveSettingsToSheet(googleToken, connectedSheet.id, activeModelName);
         await syncAllToGoogleSheet(googleToken, connectedSheet.id, {
           properties,
           guests,
-          apiKey: userApiKey.trim(),
           preferredModel: activeModelName
         });
-        showToast('Nastavení a Gemini API klíč byly uloženy do Google Sheetu!', 'success');
+        showToast('Model uložen do Google Sheetu. API klíč zůstává bezpečně jen v RAM.', 'success');
       } catch (err: any) {
-        showToast(`Uloženo lokálně, ale zápis do Sheetu selhal: ${err.message}`, 'warning');
+        showToast(`Nastavení uloženo v prohlížeči, zápis modelu do Sheetu selhal: ${err.message}`, 'warning');
       }
     } else {
-      showToast('Nastavení bylo uloženo lokálně.', 'success');
+      showToast(
+        trimmedKey
+          ? 'Nastavení uloženo. API klíč je aktivní pouze v operační paměti (RAM).'
+          : 'Nastavení předvoleb uloženo.',
+        'success'
+      );
     }
 
-    if (userApiKey.trim()) {
-      refreshModelsList(userApiKey.trim());
+    if (trimmedKey) {
+      refreshModelsList(trimmedKey);
     }
 
     setIsSettingsModalOpen(false);
@@ -1883,26 +1927,26 @@ export default function App() {
             {/* Detailní ikona formuláře s efektním nápisem Uby */}
             <ScannedFormUbyIcon size={36} />
 
-            {/* Model Gemini nebo tlačítko pro zadání Google API klíče */}
+            {/* Model Gemini nebo tlačítko pro odemčení API klíče z Klíčenky / KeePassu */}
             <div className="min-w-0 flex flex-col justify-center">
               {!userApiKey || !userApiKey.trim() ? (
                 <button
                   onClick={() => setIsMissingKeyModalOpen(true)}
-                  className="text-[10px] text-amber-400 hover:text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-md font-semibold flex items-center gap-1 tap-active cursor-pointer shadow-sm shadow-amber-500/10 animate-pulse whitespace-nowrap"
-                  title="Klikněte pro zadání Google API klíče"
+                  className="text-[11px] text-amber-300 hover:text-amber-200 bg-amber-500/15 border border-amber-500/40 px-2.5 min-h-[36px] rounded-lg font-semibold flex items-center gap-1.5 tap-active cursor-pointer whitespace-nowrap"
+                  title="Odemknout Gemini API klíč z Klíčenky (Face ID) nebo KeePassu do RAM"
                 >
-                  <KeyRound className="w-3 h-3 text-amber-400 shrink-0" />
-                  <span>Google API klíč</span>
+                  <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>Klíč (Klíčenka / RAM)</span>
                 </button>
               ) : (
                 <button
                   onClick={openModelSelector}
-                  className="text-[11px] text-slate-300 hover:text-sky-300 bg-slate-900/80 border border-slate-700/80 px-2 py-0.5 rounded-md font-mono flex items-center gap-1 tap-active cursor-pointer truncate max-w-[140px] sm:max-w-[190px]"
-                  title="Změnit Gemini model"
+                  className="text-[11px] text-slate-300 hover:text-sky-300 bg-slate-900/80 border border-slate-700/80 px-2.5 min-h-[36px] rounded-lg font-mono flex items-center gap-1.5 tap-active cursor-pointer truncate max-w-[155px] sm:max-w-[205px]"
+                  title="Klíč aktivní v RAM • Klikněte pro změnu Gemini modelu"
                 >
-                  <Zap className="w-3 h-3 text-amber-400 shrink-0" />
+                  <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                   <span className="truncate">{activeModelName}</span>
-                  <ChevronDown className="w-2.5 h-2.5 text-slate-400 shrink-0" />
+                  <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
                 </button>
               )}
             </div>
@@ -2754,13 +2798,23 @@ export default function App() {
               </p>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-purple-400 flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5" />
                 Gemini OCR skener lístků
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
                 Formuláře vyfocené mobilním telefonem jsou bleskově vytěženy multimodálním modelem Gemini Flash. Systém automaticky převede data do velkých písmen, odstraní diakritiku a namapuje 3místné ISO kódy států.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <h3 className="text-xs font-bold text-sky-400 flex items-center gap-1.5">
+                <KeyRound className="w-3.5 h-3.5" />
+                Bezpečné uložení API klíčů (Face ID / Klíčenka / KeePass)
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                V kódu na GitHub Pages nejsou žádné API klíče a aplikace je neukládá ani do úložiště prohlížeče (<code>localStorage</code>) ani do Google Sheetu. Gemini API klíč si bezpečně uložte do <strong>Klíčenky na iPhonu / Macu (Face ID / Touch ID)</strong> nebo do <strong>KeePassu</strong> na PC. Po automatickém vyplnění zůstává klíč výhradně v operační paměti (RAM) a po zavření karty se automaticky smaže.
               </p>
             </div>
           </div>
@@ -3632,23 +3686,71 @@ export default function App() {
               </button>
             </div>
 
-            <form onSubmit={handleSaveSettings} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-300 font-bold mb-1">
-                  Google Gemini API klíč pro OCR
-                </label>
-                <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+            <form onSubmit={handleSaveSettings} autoComplete="on" className="space-y-4 text-xs">
+              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-200 font-bold flex items-center gap-1.5">
+                    <KeyRound className="w-4 h-4 text-sky-400 shrink-0" />
+                    <span>Gemini OCR API klíč (pouze RAM)</span>
+                  </span>
+                  {userApiKey.trim() ? (
+                    <button
+                      type="button"
+                      onClick={handleClearApiKeyFromRam}
+                      className="text-[11px] text-rose-400 hover:underline font-semibold cursor-pointer whitespace-nowrap"
+                    >
+                      Vymazat z RAM
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-amber-400 font-semibold whitespace-nowrap">Uzamčeno</span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="settings-keychain-user" className="block text-[11px] text-slate-400 font-semibold mb-1">
+                    Název účtu pro Klíčenku / KeePass:
+                  </label>
                   <input
-                    type="password"
-                    value={userApiKey}
-                    onChange={e => setUserApiKey(e.target.value)}
-                    placeholder="Zadejte váš API klíč..."
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl pl-9 pr-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none font-mono"
+                    id="settings-keychain-user"
+                    type="text"
+                    name="username"
+                    autoComplete="username"
+                    value={keychainAccountName}
+                    onChange={e => setKeychainAccountName(e.target.value)}
+                    placeholder="UbyExport Gemini OCR"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
                 </div>
-                <p className="text-[10px] text-slate-400 mt-1">
-                  Klíč se synchronizuje do Google Sheetu na list <code>Nastaveni</code>, takže jej nemusíte zadávat znovu na jiných zařízeních.
+
+                <div>
+                  <label htmlFor="settings-gemini-key" className="block text-[11px] text-slate-400 font-semibold mb-1">
+                    API klíč (uložte do Face ID / macOS Klíčenky / KeePassu):
+                  </label>
+                  <div className="relative flex items-center">
+                    <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 pointer-events-none" />
+                    <input
+                      id="settings-gemini-key"
+                      type={showApiKey ? 'text' : 'password'}
+                      name="password"
+                      autoComplete="current-password"
+                      value={userApiKey}
+                      onChange={e => setUserApiKey(e.target.value)}
+                      placeholder="AIza... (vyplňte z Klíčenky / KeePassu)"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl pl-9 pr-11 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(prev => !prev)}
+                      className="absolute right-1 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                      title={showApiKey ? 'Skrýt klíč' : 'Zobrazit klíč'}
+                    >
+                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Klíč se <strong className="text-slate-200">neukládá do úložiště prohlížeče ani do Google Sheetu</strong>. Po kliknutí na <em>Uložit do Klíčenky / RAM</em> vám Safari na iPhonu či Macu nabídne bezpečné uložení pod <strong>Face ID / Touch ID</strong>; na PC použijte <strong>KeePass</strong>.
                 </p>
               </div>
 
@@ -3805,15 +3907,15 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setIsSettingsModalOpen(false)}
-                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active"
+                  className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active cursor-pointer"
                 >
                   Zavřít
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active"
+                  className="flex-1 min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active cursor-pointer whitespace-nowrap"
                 >
-                  Uložit nastavení
+                  Uložit do Klíčenky / RAM
                 </button>
               </div>
             </form>
@@ -3922,71 +4024,116 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL 8: MISSING API KEY ALERT */}
+      {/* MODAL 8: KEYCHAIN / KEEPASS API KEY UNLOCK (RAM-ONLY) */}
       {isMissingKeyModalOpen && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-5 space-y-4 text-center">
-            <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 mx-auto flex items-center justify-center">
-              <KeyRound className="w-6 h-6" />
-            </div>
-            <div>
-              <h3 className="font-bold text-white text-base">Zadejte Google Gemini API klíč</h3>
-              <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                Na hostingu GitHub Pages probíhá rozpoznávání lístků přímo ve vašem prohlížeči pomocí Google Gemini API. Zadejte svůj bezplatný klíč:
-              </p>
-            </div>
-
-            <div className="space-y-1.5 text-left">
-              <label className="text-[11px] text-slate-300 font-semibold block">Váš Google Gemini API klíč:</label>
-              <input
-                type="password"
-                value={userApiKey}
-                onChange={e => setUserApiKey(e.target.value)}
-                placeholder="Zadejte váš API klíč..."
-                className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-              />
-              <p className="text-[10px] text-slate-500">
-                Bezplatný klíč získáte na{' '}
-                <a
-                  href="https://aistudio.google.com/apikey"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-blue-400 underline font-semibold"
-                >
-                  aistudio.google.com/apikey
-                </a>
-              </p>
-            </div>
-
-            <div className="flex gap-2 pt-1">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-5 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div className="text-left">
+                  <h3 className="font-bold text-white text-base">Odemknout Gemini API klíč</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Pouze v RAM · iOS Klíčenka (Face ID) / KeePass
+                  </p>
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => setIsMissingKeyModalOpen(false)}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active"
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 min-h-[36px] min-w-[36px] flex items-center justify-center cursor-pointer"
               >
-                Zrušit
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  if (!userApiKey.trim()) {
-                    showToast('Zadejte prosím API klíč.', 'warning');
-                    return;
-                  }
-                  safeStorage.setItem('ubyport_user_api_key', userApiKey.trim());
-                  safeStorage.setItem('airtax_secure_key_blob', userApiKey.trim());
-                  refreshModelsList(userApiKey.trim());
-                  setIsMissingKeyModalOpen(false);
-                  showToast('API klíč byl uložen!', 'success');
-                  if (imagePreview) {
-                    processImageWithOcr(imagePreview);
-                  }
-                }}
-                className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer shadow-lg shadow-blue-600/30"
-              >
-                Uložit klíč
+                <X className="w-5 h-5" />
               </button>
             </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              V repozitáři nejsou uloženy žádné klíče. Odemkněte svůj klíč z <strong className="text-white">Klíčenky přes Face ID</strong> (iPhone / Mac) nebo z <strong className="text-white">KeePassu</strong> na PC. Po zavření stránky se klíč z paměti vymaže.
+            </p>
+
+            <form onSubmit={handleUnlockKeyFromModal} autoComplete="on" className="space-y-3 text-left">
+              <div>
+                <label htmlFor="unlock-keychain-user" className="text-[11px] text-slate-400 font-semibold block mb-1">
+                  Účet v Klíčence / KeePassu:
+                </label>
+                <input
+                  id="unlock-keychain-user"
+                  type="text"
+                  name="username"
+                  autoComplete="username"
+                  value={keychainAccountName}
+                  onChange={e => setKeychainAccountName(e.target.value)}
+                  placeholder="UbyExport Gemini OCR"
+                  className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label htmlFor="unlock-gemini-key" className="text-[11px] text-slate-300 font-semibold">
+                    Google Gemini API klíč:
+                  </label>
+                  {userApiKey.trim() && (
+                    <button
+                      type="button"
+                      onClick={handleClearApiKeyFromRam}
+                      className="text-[11px] text-rose-400 hover:underline font-semibold cursor-pointer"
+                    >
+                      Vymazat z RAM
+                    </button>
+                  )}
+                </div>
+                <div className="relative flex items-center">
+                  <input
+                    id="unlock-gemini-key"
+                    type={showApiKey ? 'text' : 'password'}
+                    name="password"
+                    autoComplete="current-password"
+                    value={userApiKey}
+                    onChange={e => setUserApiKey(e.target.value)}
+                    placeholder="Klepněte a vyberte z Klíčenky / vložte..."
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl pl-3 pr-11 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(prev => !prev)}
+                    className="absolute right-1 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                    title={showApiKey ? 'Skrýt klíč' : 'Zobrazit klíč'}
+                  >
+                    {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  Bezplatný klíč získáte na{' '}
+                  <a
+                    href="https://aistudio.google.com/apikey"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-400 underline font-semibold"
+                  >
+                    aistudio.google.com/apikey
+                  </a>
+                </p>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsMissingKeyModalOpen(false)}
+                  className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                >
+                  Zrušit
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer shadow-lg shadow-blue-600/30 whitespace-nowrap"
+                >
+                  Odemknout do RAM
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -4026,7 +4173,7 @@ export default function App() {
             {domainModalType === 'firebase' ? (
               <div className="space-y-3">
                 <p className="text-slate-300 leading-relaxed text-[11px]">
-                  Firebase Authentication vyžaduje, aby každá webová doména, ze které se uživatelé přihlašují, byla zapsána v seznamu <strong className="text-white">Autorizovaných domén</strong> projektu <code className="text-sky-300 font-mono font-bold">{firebaseProjectId}</code>.
+                  Firebase Authentication vyžaduje, aby každá webová doména, ze které se uživatelé přihlašují, byla zapsána v seznamu <strong className="text-white">Autorizovaných domén</strong> vašeho Firebase projektu{getFirebaseProjectId() ? <> (<code className="text-sky-300 font-mono font-bold">{getFirebaseProjectId()}</code>)</> : null}.
                 </p>
 
                 <div>
@@ -4066,7 +4213,7 @@ export default function App() {
             ) : (
               <div className="space-y-3">
                 <p className="text-slate-300 leading-relaxed text-[11px]">
-                  Google OAuth 2.0 (GIS) vyžaduje, aby byl původ webu (<strong className="text-white">Origin</strong>) zapsán v Google Cloud Console v sekci <strong className="text-white">Autorizované zdroje JavaScriptu</strong> u aktivního klientského ID. Výchozí ID projektu je určeno primárně pro Firebase Authentication – pro přímé OAuth2 na vlastní doméně vložte své Web OAuth Client ID níže.
+                  Google OAuth 2.0 (GIS) vyžaduje vlastní <strong className="text-white">Web OAuth Client ID</strong> (z bezpečnostních důvodů není žádné ID v kódu) a povolený původ webu (<strong className="text-white">Origin</strong>) v Google Cloud Console v sekci <strong className="text-white">Autorizované zdroje JavaScriptu</strong>.
                 </p>
 
                 <div>
@@ -4093,11 +4240,11 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Vlastní OAuth Client ID editor s validací formátu */}
+                {/* Vlastní OAuth Client ID editor (pouze RAM) */}
                 <div className="space-y-1.5 bg-slate-950/70 p-3 rounded-2xl border border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">
-                      Vlastní Web OAuth 2.0 Client ID (volitelné)
+                      Vlastní Web OAuth 2.0 Client ID (pouze v RAM)
                     </label>
                     {isUsingCustomOAuthClientId() && (
                       <button
@@ -4105,11 +4252,11 @@ export default function App() {
                         onClick={() => {
                           setCustomOAuthClientId('');
                           setCustomOAuthClientIdState('');
-                          showToast('Obnoveno výchozí OAuth Client ID.', 'info');
+                          showToast('OAuth Client ID vymazáno z RAM.', 'info');
                         }}
                         className="text-[10px] text-amber-400 hover:underline font-semibold cursor-pointer"
                       >
-                        Obnovit výchozí
+                        Vymazat
                       </button>
                     )}
                   </div>
@@ -4118,8 +4265,8 @@ export default function App() {
                       type="text"
                       value={customOAuthClientId}
                       onChange={(e) => setCustomOAuthClientIdState(e.target.value)}
-                      placeholder={OAUTH_CLIENT_ID}
-                      className="flex-1 bg-slate-900 border border-slate-700 focus:border-blue-500 rounded-xl px-2.5 py-1.5 text-[11px] text-white font-mono placeholder:text-slate-600 outline-none"
+                      placeholder="123456789-xxxx.apps.googleusercontent.com"
+                      className="flex-1 min-h-[40px] bg-slate-900 border border-slate-700 focus:border-blue-500 rounded-xl px-2.5 py-1.5 text-[11px] text-white font-mono placeholder:text-slate-600 outline-none"
                     />
                     <button
                       type="button"
@@ -4132,18 +4279,21 @@ export default function App() {
                         try {
                           setCustomOAuthClientId(val);
                           setCustomOAuthClientIdState(val);
-                          showToast(val ? 'Vlastní OAuth Client ID uloženo!' : 'Obnoveno výchozí Client ID.', 'success');
+                          showToast(val ? 'OAuth Client ID nastaveno v RAM!' : 'OAuth Client ID vymazáno.', 'success');
                         } catch (err: any) {
                           showToast(err.message, 'warning');
                         }
                       }}
-                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[11px] font-bold tap-active shrink-0 cursor-pointer"
+                      className="min-h-[40px] px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[11px] font-bold tap-active shrink-0 cursor-pointer"
                     >
-                      Uložit ID
+                      Použít v RAM
                     </button>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-snug">
-                    Aktivní ID: <code className="text-sky-300 font-mono break-all">{getActiveOAuthClientId()}</code>
+                    Aktivní ID:{' '}
+                    <code className="text-sky-300 font-mono break-all">
+                      {getActiveOAuthClientId() || 'nezadáno'}
+                    </code>
                   </p>
                 </div>
 
@@ -4163,7 +4313,7 @@ export default function App() {
             <div className="p-2.5 rounded-xl bg-blue-950/30 border border-blue-500/20 text-blue-300 text-[11px] flex items-start gap-2">
               <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
               <p>
-                <strong>Tip:</strong> Aplikace funguje spolehlivě i offline. Všechna ubytování a hosty ukládá v paměti vašeho telefonu a hotový soubor <strong>.UNL</strong> můžete kdykoliv exportovat na záložce <em>Export UNL</em>.
+                <strong>Tip:</strong> Nejjednodušší práce s Google Sheets bez jakéhokoliv nastavení Google Cloud či Firebase je přes <strong>Veřejný odkaz &amp; Excel/CSV export</strong> v menu <em>Sheets / Excel</em>.
               </p>
             </div>
 
@@ -4172,16 +4322,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsDomainModalOpen(false)}
-                className="py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
+                className="min-h-[44px] py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active text-xs cursor-pointer"
               >
                 Zavřít
               </button>
               {domainModalType === 'firebase' ? (
                 <a
-                  href={firebaseAuthSettingsUrl}
+                  href={getFirebaseAuthSettingsUrl()}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer shadow-lg shadow-amber-600/30"
+                  className="flex-1 min-h-[44px] py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer shadow-lg shadow-amber-600/30"
                 >
                   <span>Přejít do Firebase Console</span>
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -4189,10 +4339,10 @@ export default function App() {
               ) : (
                 <>
                   <a
-                    href={googleCloudCredentialsUrl}
+                    href={getGoogleCloudCredentialsUrl()}
                     target="_blank"
                     rel="noreferrer"
-                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer"
+                    className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 tap-active text-xs cursor-pointer"
                   >
                     <span>Google Cloud Console</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -4203,7 +4353,7 @@ export default function App() {
                       setIsDomainModalOpen(false);
                       handleGoogleLogin('gis');
                     }}
-                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
+                    className="flex-1 min-h-[44px] py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
                   >
                     Zkusit OAuth2 znovu
                   </button>
@@ -4214,7 +4364,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL 10: FIREBASE WEB API KEY CONFIGURATION */}
+      {/* MODAL 10: MANUAL FIREBASE CONFIGURATION (RAM-ONLY FALLBACK) */}
       {isFirebaseKeyModalOpen && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-4 sm:p-5 space-y-4 text-xs shadow-2xl my-auto">
@@ -4225,16 +4375,16 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="font-extrabold text-white text-sm sm:text-base">
-                    Webový API klíč Firebase
+                    Volitelné Firebase přihlášení (pouze RAM)
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    Projekt: <span className="text-sky-300 font-mono font-bold">{firebaseProjectId}</span>
+                    Z repozitáře byly všechny klíče odstraněny
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setIsFirebaseKeyModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 tap-active shrink-0 cursor-pointer"
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 tap-active shrink-0 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -4242,15 +4392,15 @@ export default function App() {
 
             <div className="space-y-2 text-slate-300 leading-relaxed text-[11px]">
               <p>
-                Pro přihlášení přes <strong className="text-white">Firebase Authentication</strong> a propojení Google Disku a Google Docs potřebuje aplikace Webový klíč API vašeho Firebase projektu.
+                Chcete-li použít volitelný záložní režim přes <strong className="text-white">Firebase Authentication</strong>, zadejte svůj <strong>Project ID</strong> a <strong>Web API klíč</strong>. Údaje zůstávají jen v RAM (pro uložení použijte Klíčenku nebo KeePass).
               </p>
               <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-                <span className="text-slate-400 font-semibold block">Kde klíč naleznete:</span>
+                <span className="text-slate-400 font-semibold block">Kde údaje naleznete:</span>
                 <p className="text-slate-300">
-                  Ve Firebase Console v <em>Nastavení projektu</em> &rarr; záložka <em>Obecné</em> &rarr; řádek <strong>Webový klíč rozhraní API</strong>.
+                  Ve Firebase Console v <em>Nastavení projektu</em> &rarr; záložka <em>Obecné</em> &rarr; <strong>ID projektu</strong> a <strong>Webový klíč rozhraní API</strong>.
                 </p>
                 <a
-                  href={firebaseGeneralSettingsUrl}
+                  href={getFirebaseGeneralSettingsUrl()}
                   target="_blank"
                   rel="noreferrer"
                   className="text-sky-400 hover:underline flex items-center gap-1 font-semibold pt-1"
@@ -4261,71 +4411,112 @@ export default function App() {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                Zadejte Firebase Web API klíč (začíná na AIza...):
-              </label>
-              <input
-                type="text"
-                value={firebaseApiKeyInput}
-                onChange={(e) => setFirebaseApiKeyInput(e.target.value.trim())}
-                placeholder="AIzaSy..."
-                className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
-              />
-            </div>
+            <form
+              autoComplete="on"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!firebaseProjectIdInput.trim() || !firebaseApiKeyInput.trim()) {
+                  showToast('Zadejte prosím Firebase Project ID i Webový klíč API.', 'warning');
+                  return;
+                }
+                setManualFirebaseConfig(firebaseProjectIdInput.trim(), firebaseApiKeyInput.trim());
+                setIsFirebaseKeyModalOpen(false);
+                showToast('Firebase konfigurace uložena pouze v RAM!', 'success');
+                handleGoogleLogin('firebase');
+              }}
+              className="space-y-3"
+            >
+              <div className="space-y-1">
+                <label htmlFor="fb-project-id" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  Firebase Project ID (účet):
+                </label>
+                <input
+                  id="fb-project-id"
+                  type="text"
+                  name="username"
+                  autoComplete="username"
+                  value={firebaseProjectIdInput}
+                  onChange={(e) => setFirebaseProjectIdInput(e.target.value)}
+                  placeholder="např. muj-ubyport-projekt"
+                  className="w-full min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
+                />
+              </div>
 
-            <div className="pt-2 flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  if (!firebaseApiKeyInput.trim()) {
-                    showToast('Zadejte prosím Webový klíč API.', 'warning');
-                    return;
-                  }
-                  setFirebaseApiKey(firebaseApiKeyInput.trim());
-                  setIsFirebaseKeyModalOpen(false);
-                  showToast('Firebase Web API klíč byl uložen!', 'success');
-                  handleGoogleLogin('firebase');
-                }}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
-              >
-                Uložit klíč a přihlásit se přes Firebase
-              </button>
+              <div className="space-y-1">
+                <label htmlFor="fb-api-key" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  Firebase Web API klíč (heslo):
+                </label>
+                <input
+                  id="fb-api-key"
+                  type="password"
+                  name="password"
+                  autoComplete="current-password"
+                  value={firebaseApiKeyInput}
+                  onChange={(e) => setFirebaseApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
+                />
+              </div>
 
-              <div className="flex items-center justify-between gap-2 pt-1">
+              <div className="pt-1 flex flex-col gap-2">
                 <button
-                  type="button"
-                  onClick={() => setIsFirebaseKeyModalOpen(false)}
-                  className="py-2 px-3 text-slate-400 hover:text-white text-xs tap-active cursor-pointer"
+                  type="submit"
+                  className="w-full min-h-[44px] py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
                 >
-                  Zrušit
+                  Použít v RAM a přihlásit se přes Firebase
                 </button>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsFirebaseKeyModalOpen(false);
-                      setDomainModalType('gis');
-                      setIsDomainModalOpen(true);
-                    }}
-                    className="py-2 px-2.5 text-sky-400 hover:underline text-[11px] font-semibold cursor-pointer"
-                  >
-                    Nastavit OAuth ID
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsFirebaseKeyModalOpen(false);
-                      setAuthMethodChoice('gis');
-                      handleGoogleLogin('gis');
-                    }}
-                    className="py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                  >
-                    Zkusit přímé Google OAuth (GIS)
-                  </button>
+
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsFirebaseKeyModalOpen(false)}
+                      className="min-h-[40px] py-2 px-3 text-slate-400 hover:text-white text-xs tap-active cursor-pointer"
+                    >
+                      Zrušit
+                    </button>
+                    {hasFirebaseApiKey() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearManualFirebaseConfig();
+                          setFirebaseProjectIdInput('');
+                          setFirebaseApiKeyInput('');
+                          showToast('Firebase údaje vymazány z RAM.', 'info');
+                        }}
+                        className="min-h-[40px] py-2 px-2 text-rose-400 hover:underline text-[11px] font-semibold cursor-pointer"
+                      >
+                        Vymazat z RAM
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsFirebaseKeyModalOpen(false);
+                        setDomainModalType('gis');
+                        setIsDomainModalOpen(true);
+                      }}
+                      className="py-2 px-2.5 text-sky-400 hover:underline text-[11px] font-semibold cursor-pointer"
+                    >
+                      OAuth Client ID
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsFirebaseKeyModalOpen(false);
+                        setAuthMethodChoice('gis');
+                        handleGoogleLogin('gis');
+                      }}
+                      className="min-h-[40px] py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                    >
+                      Přímé OAuth2 (GIS)
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            </form>
           </div>
         </div>
       )}
@@ -4406,7 +4597,7 @@ export default function App() {
                   </div>
 
                   <p className="text-[11px] text-slate-400 leading-relaxed">
-                    V Google Sheets klikněte na <strong className="text-slate-200">Sdílet → Kdokoliv s odkazem (Čtenář)</strong> a vložte odkaz níže. Aplikace načte listy <code>Ubytovani</code>, <code>Hoste</code> i <code>Nastaveni</code> bez přihlašování.
+                    V Google Sheets klikněte na <strong className="text-slate-200">Sdílet → Kdokoliv s odkazem (Čtenář)</strong> a vložte odkaz níže. Aplikace načte listy <code>Ubytovani</code> a <code>Hoste</code> bez přihlašování (API klíče se v sešitu nikdy neukládají).
                   </p>
 
                   <div className="flex flex-col sm:flex-row gap-2">

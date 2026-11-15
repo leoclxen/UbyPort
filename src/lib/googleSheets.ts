@@ -11,7 +11,6 @@ export interface SpreadsheetInfo {
 export interface SheetDataPayload {
   properties: Property[];
   guests: Guest[];
-  apiKey?: string;
   preferredModel?: string;
 }
 
@@ -155,11 +154,10 @@ async function ensureRequiredSheetsExist(accessToken: string, spreadsheetId: str
   missing.forEach(sheetName => {
     if (sheetName === 'Nastaveni') {
       updateData.push({
-        range: `'Nastaveni'!A1:C4`,
+        range: `'Nastaveni'!A1:C3`,
         values: [
           HEADERS.Nastaveni,
-          ['GEMINI_API_KEY', '', 'Váš Google Gemini API klíč pro automatické OCR rozpoznávání'],
-          ['PREFEROVANY_MODEL', 'gemini-flash-latest', 'Aktivní model Gemini (gemini-flash-latest / 3.8-flash / 3.1-flash-lite)'],
+          ['PREFEROVANY_MODEL', 'gemini-flash-latest', 'Aktivní model Gemini (API klíč se do sešitu z bezpečnostních důvodů neukládá)'],
           ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas vytvoření listu']
         ]
       });
@@ -192,11 +190,10 @@ async function initializeHeadersAndInitialData(accessToken: string, spreadsheetI
     { range: 'Hoste!A1:T1', values: [HEADERS.Hoste] },
     { range: 'Prehled_hlaseni!A1:G1', values: [HEADERS.Prehled_hlaseni] },
     {
-      range: 'Nastaveni!A1:C4',
+      range: 'Nastaveni!A1:C3',
       values: [
         HEADERS.Nastaveni,
-        ['GEMINI_API_KEY', '', 'Váš Google Gemini API klíč pro automatické OCR rozpoznávání'],
-        ['PREFEROVANY_MODEL', 'gemini-flash-latest', 'Aktivní model Gemini (gemini-flash-latest / 3.8-flash / 3.1-flash-lite)'],
+        ['PREFEROVANY_MODEL', 'gemini-flash-latest', 'Aktivní model Gemini (API klíč se do sešitu z bezpečnostních důvodů neukládá)'],
         ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas vytvoření listu']
       ]
     }
@@ -221,7 +218,6 @@ export async function loadAllDataFromGoogleSheet(
 ): Promise<{
   properties: Property[];
   guests: Guest[];
-  apiKey: string;
   preferredModel: string;
 }> {
   const headers = { Authorization: `Bearer ${accessToken}` };
@@ -271,9 +267,8 @@ export async function loadAllDataFromGoogleSheet(
   const result = await res.json();
   const valueRanges = result.valueRanges || [];
 
-  // Parse Nastaveni
+  // Parse Nastaveni (API klíče ze sešitu záměrně nečteme)
   const configRows = valueRanges[2]?.values || [];
-  let apiKey = '';
   let preferredModel = 'gemini-flash-latest';
 
   for (const row of configRows) {
@@ -281,9 +276,7 @@ export async function loadAllDataFromGoogleSheet(
     const key = String(row[0] || '').trim();
     const val = String(row[1] || '').trim();
 
-    if (key === 'GEMINI_API_KEY') {
-      apiKey = val;
-    } else if (key === 'PREFEROVANY_MODEL' && val) {
+    if (key === 'PREFEROVANY_MODEL' && val) {
       preferredModel = val;
     }
   }
@@ -339,7 +332,7 @@ export async function loadAllDataFromGoogleSheet(
     };
   }).filter((g: Guest) => (g.lastName || g.firstName || g.idDocumentNumber));
 
-  return { properties, guests, apiKey, preferredModel };
+  return { properties, guests, preferredModel };
 }
 
 /**
@@ -405,34 +398,25 @@ export async function syncAllToGoogleSheet(
     ];
   });
 
-  // Vyčistíme stará data pod záhlavím
+  // Vyčistíme stará data pod záhlavím (včetně případného historického řádku s API klíčem na listu Nastaveni)
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchClear`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      ranges: ['Ubytovani!A2:G500', 'Hoste!A2:T10000', 'Prehled_hlaseni!A2:G500']
+      ranges: ['Ubytovani!A2:G500', 'Hoste!A2:T10000', 'Prehled_hlaseni!A2:G500', 'Nastaveni!A2:C10']
     })
   });
 
   const data: any[] = [];
 
-  // Update Nastaveni tab
-  if (payload.apiKey && payload.apiKey.trim().length > 0) {
-    const configRows = [
-      ['GEMINI_API_KEY', payload.apiKey.trim(), 'Váš Google Gemini API klíč pro automatické OCR rozpoznávání'],
+  // Update Nastaveni tab (bez API klíčů)
+  data.push({
+    range: 'Nastaveni!A2:C3',
+    values: [
       ['PREFEROVANY_MODEL', payload.preferredModel || 'gemini-flash-latest', 'Aktivní model Gemini'],
       ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas poslední synchronizace']
-    ];
-    data.push({ range: 'Nastaveni!A2:C4', values: configRows });
-  } else {
-    data.push({
-      range: 'Nastaveni!A3:C4',
-      values: [
-        ['PREFEROVANY_MODEL', payload.preferredModel || 'gemini-flash-latest', 'Aktivní model Gemini'],
-        ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas poslední synchronizace']
-      ]
-    });
-  }
+    ]
+  });
 
   if (propRows.length > 0) {
     data.push({ range: `Ubytovani!A2:G${propRows.length + 1}`, values: propRows });
@@ -463,19 +447,18 @@ export async function syncAllToGoogleSheet(
 }
 
 /**
- * Uloží API klíč a preferovaný model do Nastaveni sešitu
+ * Uloží preferovaný model do Nastaveni sešitu (API klíč se nikdy neukládá)
  */
 export async function saveSettingsToSheet(
   accessToken: string,
   spreadsheetId: string,
-  apiKey: string,
   preferredModel: string
 ): Promise<void> {
   const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
   const rows = [
-    ['GEMINI_API_KEY', apiKey || '', 'Váš Google Gemini API klíč pro automatické OCR rozpoznávání'],
     ['PREFEROVANY_MODEL', preferredModel || 'gemini-flash-latest', 'Aktivní model Gemini'],
-    ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas poslední synchronizace']
+    ['POSLEDNI_AKTUALIZACE', new Date().toISOString(), 'Čas poslední synchronizace'],
+    ['', '', '']
   ];
 
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Nastaveni!A2:C4?valueInputOption=USER_ENTERED`, {
@@ -490,18 +473,8 @@ export async function saveModelToSheet(
   spreadsheetId: string,
   preferredModel: string
 ): Promise<void> {
-  const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
-  await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Nastaveni!B3?valueInputOption=USER_ENTERED`,
-    {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ values: [[preferredModel]] })
-    }
-  );
+  await saveSettingsToSheet(accessToken, spreadsheetId, preferredModel);
 }
-
-export const saveApiKeyToSheet = saveSettingsToSheet;
 
 function extractSpreadsheetId(input: string): string {
   const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);

@@ -16,15 +16,59 @@ export type User = FirebaseUser | {
   photoURL?: string | null;
 };
 
-export const firebaseProjectId = rawConfig.projectId || '';
-export const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${firebaseProjectId}/authentication/settings`;
-export const firebaseGeneralSettingsUrl = `https://console.firebase.google.com/project/${firebaseProjectId}/settings/general`;
-export const googleCloudCredentialsUrl = `https://console.cloud.google.com/apis/credentials?project=${firebaseProjectId}`;
+export const OAUTH_CLIENT_ID = (rawConfig as any).oAuthClientId || '';
 
-export const OAUTH_CLIENT_ID = rawConfig.oAuthClientId || '';
-
-const CUSTOM_OAUTH_CLIENT_KEY = 'ubyport_custom_oauth_client_id';
 const OAUTH_CLIENT_ID_REGEX = /^[0-9]+-[a-zA-Z0-9._-]+\.apps\.googleusercontent\.com$/;
+
+// Citlivé identifikační údaje pro volitelné Firebase / OAuth2 držíme výhradně v operační paměti (RAM)
+let manualOAuthClientId = '';
+let manualFirebaseApiKey = '';
+let manualFirebaseProjectId = '';
+let initializedFirebaseSignature: string | null = null;
+
+// Vyčistit případné historicky uložené klíče a tokeny z prohlížečových úložišť
+const LEGACY_STORAGE_KEYS = [
+  'ubyport_custom_oauth_client_id',
+  'ubyport_firebase_api_key',
+  'ubyport_google_token'
+];
+try {
+  if (typeof window !== 'undefined') {
+    for (const k of LEGACY_STORAGE_KEYS) {
+      try {
+        localStorage.removeItem(k);
+      } catch {}
+      try {
+        sessionStorage.removeItem(k);
+      } catch {}
+    }
+  }
+} catch {}
+
+export const getFirebaseProjectId = (): string => {
+  return (manualFirebaseProjectId || rawConfig.projectId || '').trim();
+};
+
+export const getFirebaseAuthSettingsUrl = (): string => {
+  const pid = getFirebaseProjectId();
+  return pid
+    ? `https://console.firebase.google.com/project/${encodeURIComponent(pid)}/authentication/settings`
+    : 'https://console.firebase.google.com/';
+};
+
+export const getFirebaseGeneralSettingsUrl = (): string => {
+  const pid = getFirebaseProjectId();
+  return pid
+    ? `https://console.firebase.google.com/project/${encodeURIComponent(pid)}/settings/general`
+    : 'https://console.firebase.google.com/';
+};
+
+export const getGoogleCloudCredentialsUrl = (): string => {
+  const pid = getFirebaseProjectId();
+  return pid
+    ? `https://console.cloud.google.com/apis/credentials?project=${encodeURIComponent(pid)}`
+    : 'https://console.cloud.google.com/apis/credentials';
+};
 
 export const sanitizeOAuthClientId = (raw: string): string => {
   return (raw || '')
@@ -38,35 +82,20 @@ export const isValidOAuthClientId = (clientId: string): boolean => {
 };
 
 export const isUsingCustomOAuthClientId = (): boolean => {
-  try {
-    const custom = localStorage.getItem(CUSTOM_OAUTH_CLIENT_KEY);
-    return !!(custom && isValidOAuthClientId(custom));
-  } catch {
-    return false;
-  }
+  return Boolean(manualOAuthClientId && isValidOAuthClientId(manualOAuthClientId));
 };
 
 export const getActiveOAuthClientId = (): string => {
-  try {
-    const rawCustom = localStorage.getItem(CUSTOM_OAUTH_CLIENT_KEY);
-    if (rawCustom && rawCustom.trim()) {
-      const cleaned = sanitizeOAuthClientId(rawCustom);
-      if (isValidOAuthClientId(cleaned)) {
-        return cleaned;
-      }
-      // Odstranit poškozené / neplatné klientské ID, aby nezpůsobovalo chybu 400 invalid_request
-      localStorage.removeItem(CUSTOM_OAUTH_CLIENT_KEY);
-    }
-  } catch {}
+  if (manualOAuthClientId && isValidOAuthClientId(manualOAuthClientId)) {
+    return manualOAuthClientId;
+  }
   return sanitizeOAuthClientId(OAUTH_CLIENT_ID);
 };
 
 export const setCustomOAuthClientId = (clientId: string): void => {
   const cleaned = sanitizeOAuthClientId(clientId);
   if (!cleaned) {
-    try {
-      localStorage.removeItem(CUSTOM_OAUTH_CLIENT_KEY);
-    } catch {}
+    manualOAuthClientId = '';
     return;
   }
 
@@ -76,33 +105,25 @@ export const setCustomOAuthClientId = (clientId: string): void => {
     );
   }
 
-  try {
-    localStorage.setItem(CUSTOM_OAUTH_CLIENT_KEY, cleaned);
-  } catch {}
+  manualOAuthClientId = cleaned;
 };
 
 /**
- * Získání Firebase Web API klíče.
- * DŮLEŽITÉ: Nikdy nepřebírat Gemini API klíč, protože ten je omezen pouze na Generative Language API
- * a Identity Toolkit jej odmítne s chybou auth/api-keys-are-not-supported-by-this-api!
+ * Získání Firebase Web API klíče (z konfigurace nebo výhradně z RAM).
  */
 export const getFirebaseApiKey = (): string => {
+  if (manualFirebaseApiKey.trim()) {
+    return manualFirebaseApiKey.trim();
+  }
   if (rawConfig.apiKey && rawConfig.apiKey.trim()) {
     return rawConfig.apiKey.trim();
   }
-  try {
-    const custom = localStorage.getItem('ubyport_firebase_api_key');
-    if (custom && custom.trim()) return custom.trim();
-  } catch {}
   return '';
 };
 
 export const hasFirebaseApiKey = (): boolean => {
-  const k = getFirebaseApiKey();
-  return !!(k && k.trim());
+  return Boolean(getFirebaseApiKey() && getFirebaseProjectId());
 };
-
-let initializedFirebaseApiKey: string | null = null;
 
 export const resetFirebaseApps = async (): Promise<void> => {
   const existing = getApps();
@@ -115,22 +136,31 @@ export const resetFirebaseApps = async (): Promise<void> => {
       )
     );
   }
-  initializedFirebaseApiKey = null;
+  initializedFirebaseSignature = null;
+};
+
+export const setManualFirebaseConfig = (projectId: string, apiKey: string): void => {
+  const nextPid = (projectId || '').trim();
+  const nextKey = (apiKey || '').trim();
+  const nextSig = `${nextPid}:${nextKey}`;
+
+  manualFirebaseProjectId = nextPid;
+  manualFirebaseApiKey = nextKey;
+
+  if (initializedFirebaseSignature !== nextSig) {
+    void resetFirebaseApps();
+  }
 };
 
 export const setFirebaseApiKey = (key: string): void => {
-  const trimmed = (key || '').trim();
-  try {
-    if (!trimmed) {
-      localStorage.removeItem('ubyport_firebase_api_key');
-    } else {
-      localStorage.setItem('ubyport_firebase_api_key', trimmed);
-    }
-  } catch {}
+  setManualFirebaseConfig(getFirebaseProjectId(), key);
+};
 
-  if (initializedFirebaseApiKey !== trimmed) {
-    void resetFirebaseApps();
-  }
+export const clearManualFirebaseConfig = (): void => {
+  manualFirebaseProjectId = '';
+  manualFirebaseApiKey = '';
+  manualOAuthClientId = '';
+  void resetFirebaseApps();
 };
 
 /**
@@ -151,33 +181,31 @@ let isSigningIn = false;
 let currentUserInstance: User | null = null;
 let authStateListeners: ((user: User | null) => void)[] = [];
 
-// Vyčistit případný starý token z úložišť (přístupový token držíme pouze v paměti)
-try {
-  sessionStorage.removeItem('ubyport_google_token');
-} catch {
-  // safe fallback
-}
-
 export const clearStoredAccessToken = (): void => {
   cachedAccessToken = null;
 };
 
 /**
- * Inicializace Firebase App s aktuálně ověřeným klíčem
+ * Inicializace Firebase App s aktuálně zadaným klíčem a Project ID v RAM
  */
 export const getFirebaseApp = (): FirebaseApp => {
   const existing = getApps();
   const apiKey = getFirebaseApiKey();
+  const projectId = getFirebaseProjectId();
+  const signature = `${projectId}:${apiKey}`;
 
-  if (existing.length > 0 && initializedFirebaseApiKey === apiKey) {
+  if (existing.length > 0 && initializedFirebaseSignature === signature) {
     return existing[0];
   }
 
   const config = {
     ...rawConfig,
-    apiKey: apiKey || rawConfig.apiKey || ''
+    projectId,
+    apiKey,
+    authDomain: rawConfig.authDomain || (projectId ? `${projectId}.firebaseapp.com` : ''),
+    storageBucket: rawConfig.storageBucket || (projectId ? `${projectId}.firebasestorage.app` : '')
   };
-  initializedFirebaseApiKey = config.apiKey;
+  initializedFirebaseSignature = signature;
   return existing.length > 0 ? existing[0] : initializeApp(config);
 };
 
@@ -227,7 +255,6 @@ export const ensureGsiClient = (): Promise<any> => {
       reject(err);
     };
 
-    // Krátký polling pro případ, že script z index.html už doběhl před připojením listeneru
     const pollTimer = window.setInterval(finishOk, 50);
     const timeoutTimer = window.setTimeout(() => {
       finishErr(
@@ -277,7 +304,7 @@ export const signInWithGsi = async (): Promise<{ user: User; accessToken: string
   const clientId = getActiveOAuthClientId();
   if (!isValidOAuthClientId(clientId)) {
     const err: any = new Error(
-      'Zadané OAuth Client ID nemá správný formát (*.apps.googleusercontent.com).'
+      'Zadejte své Google OAuth 2.0 Client ID (*.apps.googleusercontent.com). Klíče nejsou součástí kódu aplikace.'
     );
     err.code = 'invalid_client_id';
     throw err;
@@ -358,10 +385,6 @@ export const signInWithGsi = async (): Promise<{ user: User; accessToken: string
           }
 
           currentUserInstance = user;
-          try {
-            localStorage.setItem('ubyport_google_user', JSON.stringify(user));
-          } catch {}
-
           authStateListeners.forEach(listener => listener(user));
           resolve({ user, accessToken: cachedAccessToken! });
         },
@@ -402,7 +425,7 @@ export const signInWithGsi = async (): Promise<{ user: User; accessToken: string
 };
 
 /**
- * Inicializace sledování stavu Google přihlášení (přes Firebase Auth a uloženou relaci)
+ * Inicializace sledování stavu Google přihlášení (pouze pokud uživatel ručně nakonfiguroval Firebase v RAM)
  */
 export const initAuth = (
   onAuthChange: (user: User | null) => void
@@ -444,7 +467,7 @@ export const initAuth = (
 };
 
 /**
- * Spustí autorizaci a přihlášení ke Google Docs a Workspace primárně přes Firebase Authentication
+ * Spustí autorizaci a přihlášení ke Google Docs a Workspace (volitelný záložní režim)
  */
 export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Promise<{ user: User; accessToken: string }> => {
   if (method === 'gis') {
@@ -457,16 +480,17 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
   }
 
   const apiKey = getFirebaseApiKey();
-  if (!apiKey) {
-    const err: any = new Error('Chybí Firebase Web API klíč. Zadejte prosím Webový klíč API z Firebase Console.');
+  const projectId = getFirebaseProjectId();
+  if (!apiKey || !projectId) {
+    const err: any = new Error('Zadejte Firebase Project ID a Web API klíč (uchová se pouze v RAM).');
     err.code = 'auth/missing-api-key';
     throw err;
   }
 
   try {
     isSigningIn = true;
-    // Pokud se mezitím změnil API klíč, zrušíme předchozí cachovanou Firebase instanci
-    if (getApps().length > 0 && initializedFirebaseApiKey !== apiKey) {
+    const signature = `${projectId}:${apiKey}`;
+    if (getApps().length > 0 && initializedFirebaseSignature !== signature) {
       await resetFirebaseApps();
     }
 
@@ -491,10 +515,6 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     cachedAccessToken = accessToken;
     currentUserInstance = user;
 
-    try {
-      localStorage.setItem('ubyport_google_user', JSON.stringify(user));
-    } catch {}
-
     authStateListeners.forEach(listener => listener(user));
     return { user, accessToken };
   } catch (firebaseErr: any) {
@@ -502,7 +522,6 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
     const errCode = firebaseErr.code || '';
     const errMsg = firebaseErr.message || '';
 
-    // Uživatel zavřel okno
     if (
       errCode === 'auth/popup-closed-by-user' ||
       errCode === 'auth/cancelled-popup-request' ||
@@ -514,28 +533,24 @@ export const googleSignIn = async (method: 'firebase' | 'gis' = 'firebase'): Pro
       throw err;
     }
 
-    // Zablokované vyskakovací okno
     if (errCode === 'auth/popup-blocked' || errMsg.includes('popup-blocked')) {
       const err: any = new Error('Prohlížeč zablokoval vyskakovací okno pro přihlášení. Povolte prosím vyskakovací okna.');
       err.code = 'auth/popup-blocked';
       throw err;
     }
 
-    // Doménový nesoulad ve Firebase Authentication
     if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain') || errMsg.includes('unauthorized domain')) {
       const err: any = new Error(`Doména "${typeof window !== 'undefined' ? window.location.hostname : ''}" není povolena ve Firebase Authentication.`);
       err.code = 'auth/unauthorized-domain';
       throw err;
     }
 
-    // Nepovolený Google provider ve Firebase Console
     if (errCode === 'auth/operation-not-allowed') {
       const err: any = new Error('Přihlášení přes Google není ve Firebase Console -> Authentication -> Sign-in method zapnuto.');
       err.code = 'auth/operation-not-allowed';
       throw err;
     }
 
-    // Neplatný klíč nebo klíč bez oprávnění pro Identity Toolkit
     if (
       errCode === 'auth/invalid-api-key' ||
       errMsg.includes('invalid-api-key') ||
@@ -560,7 +575,7 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 /**
- * Odhlášení uživatele a zrušení tokenu přes Firebase Auth
+ * Odhlášení uživatele a zrušení tokenu z RAM
  */
 export const googleLogout = async (): Promise<void> => {
   if (hasFirebaseApiKey()) {
