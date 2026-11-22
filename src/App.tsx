@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as jsyaml from 'js-yaml';
+
+declare const __APP_BUILD_TIME__: string;
 import {
   Camera,
   Image as ImageIcon,
@@ -2019,7 +2021,7 @@ export default function App() {
               </span>
             </h1>
             <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">
-              UbyPort 2.0
+              UbyPort 2.0 · v2.4
             </span>
           </div>
 
@@ -3088,11 +3090,11 @@ export default function App() {
                 Gemini OCR skener lístků
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Formuláře vyfocené mobilním telefonem jsou bleskově vytěženy multimodálním modelem Gemini Flash. Systém automaticky převede data do velkých písmen, odstraní diakritiku a namapuje 3místné ISO kódy států.
+                Formuláře vyfocené mobilním telefonem jsou bleskově vytěženy multimodálním modelem Gemini Flash. Systém automaticky převede jména do velkých písmen, zachová povolenou českou a evropskou diakritiku CP1250 a namapuje 3místné ISO kódy států.
               </p>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-sky-400 flex items-center gap-1.5">
                 <KeyRound className="w-3.5 h-3.5" />
                 Bezpečné uložení API klíčů (Face ID / Klíčenka / KeePass)
@@ -3100,6 +3102,11 @@ export default function App() {
               <p className="text-xs text-slate-300 leading-relaxed">
                 V kódu na GitHub Pages nejsou žádné API klíče a aplikace je neukládá ani do úložiště prohlížeče (<code>localStorage</code>) ani do Google Sheetu. Gemini API klíč si bezpečně uložte do <strong>Klíčenky na iPhonu / Macu (Face ID / Touch ID)</strong> nebo do <strong>KeePassu</strong> na PC. Po automatickém vyplnění zůstává klíč výhradně v operační paměti (RAM) a po zavření karty se automaticky smaže.
               </p>
+            </div>
+
+            <div className="pt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
+              <span>Verze: v2.4 (UNL A+U · CP1250)</span>
+              <span>Sestaveno: {typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : 'dev'}</span>
             </div>
           </div>
         )}
