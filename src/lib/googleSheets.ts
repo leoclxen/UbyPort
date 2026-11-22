@@ -1,5 +1,5 @@
 import { Property, Guest } from '../types';
-import { normalizeCountryCode, isCzechCitizen } from './ubyport';
+import { normalizeCountryCode, isCzechCitizen, normalizePurposeCode, parseCzechAddress } from './ubyport';
 
 export interface SpreadsheetInfo {
   id: string;
@@ -281,17 +281,28 @@ export async function loadAllDataFromGoogleSheet(
     }
   }
 
-  // Parse Ubytovani (7 columns: ID, Nazev, IDUB, Zkratka_zarizeni, Hostitel, Adresa, Mestska_cast)
+  // Parse Ubytovani (7+ columns)
   const propRows = valueRanges[0]?.values || [];
   const properties: Property[] = propRows.map((r: any[]) => {
+    const address = r[5] || '';
+    const districtKey = r[6] || 'praha8';
+    const parsedAddr = parseCzechAddress(address, districtKey);
     return {
       id: r[0] || `prop_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       name: r[1] || '',
       idub: r[2] || '',
       facilityCode: r[3] || '',
       hostName: r[4] || '',
-      address: r[5] || '',
-      districtKey: r[6] || 'praha8'
+      address,
+      districtKey,
+      contact: r[4] || '',
+      district: parsedAddr.district,
+      municipality: parsedAddr.municipality,
+      cityPart: parsedAddr.cityPart,
+      street: parsedAddr.street,
+      houseNumber: parsedAddr.houseNumber,
+      orientationNumber: parsedAddr.orientationNumber,
+      postalCode: parsedAddr.postalCode
     };
   }).filter((p: Property) => p.name.trim().length > 0);
 
@@ -324,7 +335,7 @@ export async function loadAllDataFromGoogleSheet(
       idDocumentNumber: r[12] || '',
       documentIssuerCountry: issCountry,
       visaNumber: r[14] || '',
-      purposeOfStay: r[15] || '1',
+      purposeOfStay: normalizePurposeCode(r[15] || '10'),
       dateArrival: r[16] || '',
       dateDeparture: r[17] || '',
       nights,
@@ -373,7 +384,7 @@ export async function syncAllToGoogleSheet(
     g.idDocumentNumber || '',
     normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
     g.visaNumber || '',
-    g.purposeOfStay || '1',
+    normalizePurposeCode(g.purposeOfStay || '10'),
     g.dateArrival || '',
     g.dateDeparture || '',
     g.nights || 1,

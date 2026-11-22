@@ -1,5 +1,11 @@
 import { Property, Guest } from '../types';
-import { normalizeCountryCode, isCzechCitizen, parseDateToISO } from './ubyport';
+import {
+  normalizeCountryCode,
+  isCzechCitizen,
+  parseDateToISO,
+  normalizePurposeCode,
+  parseCzechAddress
+} from './ubyport';
 
 export interface ParsedSheetUrl {
   spreadsheetId: string;
@@ -188,18 +194,43 @@ function parsePropertiesFromRows(rows: string[][]): Property[] {
   const iHost = idx(['hostitel', 'host', 'host_name', 'ubytovatel'], 4);
   const iAddr = idx(['adresa', 'address'], 5);
   const iDist = idx(['mestska_cast', 'district', 'district_key'], 6);
+  const iContact = idx(['kontakt', 'contact'], -1);
+  const iOkres = idx(['okres', 'obvod'], -1);
+  const iObec = idx(['obec', 'mesto', 'municipality'], -1);
+  const iCast = idx(['cast_obce', 'city_part'], -1);
+  const iUlice = idx(['ulice', 'street'], -1);
+  const iCp = idx(['cislo_domovni', 'cp', 'house_number'], -1);
+  const iCo = idx(['cislo_orientacni', 'co', 'orientation_number'], -1);
+  const iPsc = idx(['psc', 'postal_code', 'zip'], -1);
+
+  const cell = (r: string[], i: number) => (i >= 0 && i < r.length ? (r[i] || '').trim() : '');
 
   return rows
     .slice(1)
-    .map((r, rowIdx) => ({
-      id: (r[iId] || '').trim() || `prop_sheet_${rowIdx + 1}`,
-      name: (r[iName] || '').trim(),
-      idub: (r[iIdub] || '').trim().toUpperCase(),
-      facilityCode: (r[iFac] || '').trim().toUpperCase().substring(0, 5),
-      hostName: (r[iHost] || '').trim(),
-      address: (r[iAddr] || '').trim(),
-      districtKey: (r[iDist] || '').trim() || 'praha8'
-    }))
+    .map((r, rowIdx) => {
+      const address = cell(r, iAddr);
+      const districtKey = cell(r, iDist) || 'praha8';
+      const parsed = parseCzechAddress(address, districtKey);
+      const hostName = cell(r, iHost);
+
+      return {
+        id: cell(r, iId) || `prop_sheet_${rowIdx + 1}`,
+        name: cell(r, iName),
+        idub: cell(r, iIdub).toUpperCase(),
+        facilityCode: cell(r, iFac).toUpperCase().substring(0, 5),
+        hostName,
+        address,
+        districtKey,
+        contact: cell(r, iContact) || hostName,
+        district: cell(r, iOkres) || parsed.district,
+        municipality: cell(r, iObec) || parsed.municipality,
+        cityPart: cell(r, iCast) || parsed.cityPart,
+        street: cell(r, iUlice) || parsed.street,
+        houseNumber: cell(r, iCp) || parsed.houseNumber,
+        orientationNumber: cell(r, iCo) || parsed.orientationNumber,
+        postalCode: cell(r, iPsc) || parsed.postalCode
+      };
+    })
     .filter(p => p.name.length > 0);
 }
 
@@ -240,6 +271,7 @@ function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): Guest[]
   const iDep = findCol(['odjezd', 'check_out', 'checkout', 'date_departure', 'departure'], isExactUbyportLayout ? 17 : -1);
   const iNights = findCol(['pocet_noci', 'noci', 'nights'], isExactUbyportLayout ? 18 : -1);
   const iCreated = findCol(['vytvoreno', 'created_at', 'createdat'], isExactUbyportLayout ? 19 : -1);
+  const iNote = findCol(['poznamka', 'note'], -1);
 
   const getVal = (r: string[], col: number) => (col >= 0 && col < r.length ? (r[col] || '').trim() : '');
 
@@ -279,7 +311,8 @@ function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): Guest[]
         idDocumentNumber: docNum,
         documentIssuerCountry: issCountry,
         visaNumber: getVal(r, iVisa),
-        purposeOfStay: getVal(r, iPurpose) || '1',
+        purposeOfStay: normalizePurposeCode(getVal(r, iPurpose) || '10'),
+        note: getVal(r, iNote),
         dateArrival: arrIso,
         dateDeparture: depIso,
         nights,
@@ -413,7 +446,7 @@ function buildGuestTableRows(guests: Guest[]): (string | number)[][] {
     g.idDocumentNumber || '',
     normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
     g.visaNumber || '',
-    g.purposeOfStay || '1',
+    normalizePurposeCode(g.purposeOfStay || '10'),
     g.dateArrival || '',
     g.dateDeparture || '',
     g.nights || 1,

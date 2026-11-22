@@ -1,4 +1,11 @@
-import { normalizeCountryCode, parseAddressParts, cleanAsciiUpper } from './ubyport';
+import {
+  normalizeCountryCode,
+  parseAddressParts,
+  cleanAsciiUpper,
+  cleanCp1250Name,
+  cleanCp1250Bydliste,
+  normalizePurposeCode
+} from './ubyport';
 
 export const CANDIDATE_FLASH_MODELS = [
   'gemini-2.5-flash',
@@ -35,8 +42,8 @@ Struktura formuláře:
    - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
    - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
-     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY bez diakritiky (např. KINKAID).
-     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY bez diakritiky (např. KENNETH).
+     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. NOVÁK nebo MÜLLER).
+     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. JAN nebo TOMÁŠ).
      * birthDate: Datum narození ze sloupce 'datum narození / Date of birth' ve formátu ISO YYYY-MM-DD (např. '01.10.1971' -> '1971-10-01').
      * nationality: Státní příslušnost / občanství ze sloupce 'státní občanství / Citizenship'.
        KRITICKÉ: VŽDY převeď na 3místný ISO 3166-1 alpha-3 kód.
@@ -52,7 +59,7 @@ Struktura formuláře:
      * city: Město trvalého bydliště z adresy (např. 'Littleton').
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
      * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
-     * purposeOfStay: Číslo účelu pobytu dle zaškrtnutého checkboxu (1 = turistika / leisure, 2 = zaměstnání / práce, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní).
+     * purposeOfStay: Dvouciferný kód účelu pobytu dle číselníku Ubyport (10 = turistika / leisure, 01 = obchod, 27 = zaměstnání / práce, 11 = studium, 00 = zdravotní / léčení, 03 = návštěva rodiny/přátel, 07 = sportovní, 99 = ostatní).
 
 Vrať čistý JSON s touto strukturou:
 {
@@ -81,7 +88,7 @@ Vrať čistý JSON s touto strukturou:
       "city": "Littleton",
       "street": "6917 S Queen St",
       "visaNumber": "",
-      "purposeOfStay": "1"
+      "purposeOfStay": "10"
     }
   ]
 }
@@ -254,19 +261,20 @@ export async function runClientGeminiOcr(
       }
 
       // 4. Číslo pasu / dokladu
-      const passNum = String(g.passportNumber || g.idDocumentNumber || '').replace(/\s/g, '');
+      const passNum = cleanAsciiUpper(String(g.passportNumber || g.idDocumentNumber || '')).replace(/[^A-Z0-9]/g, '');
 
       return {
         ...g,
-        lastName: cleanAsciiUpper(g.lastName),
-        firstName: cleanAsciiUpper(g.firstName),
+        lastName: cleanCp1250Name(g.lastName),
+        firstName: cleanCp1250Name(g.firstName),
         nationality: nat,
         residenceCountry: resC,
         documentIssuerCountry: issC,
         passportNumber: passNum,
         idDocumentNumber: passNum,
-        city: cleanAsciiUpper(city),
-        street: cleanAsciiUpper(street),
+        city: cleanCp1250Bydliste(city),
+        street: cleanCp1250Bydliste(street),
+        purposeOfStay: normalizePurposeCode(g.purposeOfStay),
         documentType: /ID|OP|CARD/i.test(g.documentType || '') ? 'OP' : 'PAS'
       };
     });

@@ -87,15 +87,23 @@ import {
   UBYPORT_PURPOSES,
   POPULAR_COUNTRIES,
   normalizeCountryCode,
+  normalizePurposeCode,
   cleanAsciiUpper,
+  cleanCp1250Name,
+  cleanCp1250Bydliste,
+  sanitizeCp1250Field,
   formatDateDDMMYYYY,
   parseDateToISO,
   isCzechCitizen,
   parseAddressParts,
+  parseCzechAddress,
+  resolvePropertyTypeAFields,
+  validatePropertyForUnl,
   validateGuestForUnl,
   buildUnlFile,
   parseUnlContent,
-  downloadUnlFile
+  downloadUnlFile,
+  decodeUnlBuffer
 } from './lib/ubyport';
 
 export const APP_VERSION = '2.0.0';
@@ -417,6 +425,7 @@ export default function App() {
   const [unlImportRawText, setUnlImportRawText] = useState<string>('');
   const [unlImportParsedGuests, setUnlImportParsedGuests] = useState<Guest[]>([]);
   const [unlImportDetectedFacility, setUnlImportDetectedFacility] = useState<{ idub: string; facilityCode: string } | null>(null);
+  const [unlImportDetectedProperty, setUnlImportDetectedProperty] = useState<Partial<Property> | null>(null);
 
   // Scan Verification / Accommodation Match Modal State
   const [isScanConfirmModalOpen, setIsScanConfirmModalOpen] = useState<boolean>(false);
@@ -457,7 +466,15 @@ export default function App() {
     hostName: '',
     address: '',
     districtKey: 'praha8',
-    variableSymbol: ''
+    variableSymbol: '',
+    contact: '',
+    district: '',
+    municipality: '',
+    cityPart: '',
+    street: '',
+    houseNumber: '',
+    orientationNumber: '',
+    postalCode: ''
   });
 
   // Guest form state
@@ -476,7 +493,8 @@ export default function App() {
     idDocumentNumber: '',
     documentIssuerCountry: 'DEU',
     visaNumber: '',
-    purposeOfStay: '1',
+    purposeOfStay: '10',
+    note: '',
     dateArrival: '',
     dateDeparture: '',
     nights: 1
@@ -891,10 +909,30 @@ export default function App() {
   const activeProperty = properties.find(p => p.id === activePropertyId) || properties[0];
   const activeGuests = guests.filter(g => g.propertyId === (activeProperty?.id || ''));
 
+  const handleSwitchActiveProperty = (propId: string) => {
+    setActivePropertyId(propId);
+    persistLocalState(properties, guests, propId);
+    syncServerApi('/api/active-property', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ propertyId: propId })
+    });
+  };
+
   // UNL calculation for active property
   const activeUnlResult = activeProperty
     ? buildUnlFile(activeGuests, activeProperty)
-    : { content: '', includedCount: 0, excludedCzechCount: 0, invalidCount: 0 };
+    : {
+        content: '',
+        headerLine: '',
+        guestLines: [],
+        includedCount: 0,
+        excludedCzechCount: 0,
+        invalidCount: 0,
+        propertyValidation: validatePropertyForUnl(undefined),
+        guestIssues: [],
+        canDownload: false
+      };
 
   // PROPERTY CRUD
   const openNewPropertyModal = () => {
@@ -905,7 +943,15 @@ export default function App() {
       hostName: '',
       address: '',
       districtKey: 'praha8',
-      variableSymbol: ''
+      variableSymbol: '',
+      contact: '',
+      district: '',
+      municipality: '',
+      cityPart: '',
+      street: '',
+      houseNumber: '',
+      orientationNumber: '',
+      postalCode: ''
     });
     setEditingPropId(null);
     setPropModalMode('form');
@@ -913,6 +959,7 @@ export default function App() {
   };
 
   const openEditPropertyModal = (prop: Property) => {
+    const resolved = resolvePropertyTypeAFields(prop);
     setPropForm({
       name: prop.name,
       idub: prop.idub || '',
@@ -920,11 +967,34 @@ export default function App() {
       hostName: prop.hostName || '',
       address: prop.address || '',
       districtKey: prop.districtKey || 'praha8',
-      variableSymbol: prop.variableSymbol || ''
+      variableSymbol: prop.variableSymbol || '',
+      contact: prop.contact ?? resolved.kontakt,
+      district: prop.district ?? resolved.okres,
+      municipality: prop.municipality ?? resolved.obec,
+      cityPart: prop.cityPart ?? resolved.castObce,
+      street: prop.street ?? resolved.ulice,
+      houseNumber: prop.houseNumber ?? resolved.cisloDomovni,
+      orientationNumber: prop.orientationNumber ?? resolved.cisloOrientacni,
+      postalCode: prop.postalCode ?? resolved.psc
     });
     setEditingPropId(prop.id);
     setPropModalMode('form');
     setIsPropModalOpen(true);
+  };
+
+  const handleSplitPropertyAddress = () => {
+    const parsed = parseCzechAddress(propForm.address, propForm.districtKey);
+    setPropForm(prev => ({
+      ...prev,
+      district: parsed.district || prev.district,
+      municipality: parsed.municipality || prev.municipality,
+      cityPart: parsed.cityPart || prev.cityPart,
+      street: parsed.street || prev.street,
+      houseNumber: parsed.houseNumber || prev.houseNumber,
+      orientationNumber: parsed.orientationNumber || prev.orientationNumber,
+      postalCode: parsed.postalCode || prev.postalCode
+    }));
+    showToast('Adresa byla rozdělena do polí záznamu typu A.', 'info');
   };
 
   const handleSaveProperty = async (e: React.FormEvent) => {
@@ -936,17 +1006,33 @@ export default function App() {
 
     const cleanIdub = cleanAsciiUpper(propForm.idub).replace(/\s/g, '');
     const cleanFacilityCode = cleanAsciiUpper(propForm.facilityCode).replace(/\s/g, '').substring(0, 5);
+    const cleanHouse = cleanAsciiUpper(propForm.houseNumber).replace(/\s/g, '');
+    const cleanOrient = cleanAsciiUpper(propForm.orientationNumber).replace(/\s/g, '');
+    const cleanPsc = (propForm.postalCode || '').replace(/\s/g, '');
+
+    const composedHouse = cleanHouse ? (cleanOrient ? `${cleanHouse}/${cleanOrient}` : cleanHouse) : '';
+    const composedStreet = [propForm.street.trim(), composedHouse].filter(Boolean).join(' ');
+    const composedCity = [cleanPsc, propForm.municipality.trim() || propForm.district.trim()].filter(Boolean).join(' ');
+    const fallbackAddress = [composedStreet, composedCity].filter(Boolean).join(', ');
 
     const propId = editingPropId || `prop_${Date.now()}`;
     const newProp: Property = {
       id: propId,
-      name: propForm.name.trim(),
+      name: sanitizeCp1250Field(propForm.name, false),
       idub: cleanIdub,
       facilityCode: cleanFacilityCode,
       hostName: propForm.hostName.trim(),
-      address: propForm.address.trim(),
+      address: propForm.address.trim() || fallbackAddress,
       districtKey: propForm.districtKey || 'praha8',
-      variableSymbol: propForm.variableSymbol.trim()
+      variableSymbol: propForm.variableSymbol.trim(),
+      contact: sanitizeCp1250Field(propForm.contact || propForm.hostName, false),
+      district: sanitizeCp1250Field(propForm.district, false),
+      municipality: sanitizeCp1250Field(propForm.municipality, false),
+      cityPart: sanitizeCp1250Field(propForm.cityPart, false),
+      street: sanitizeCp1250Field(propForm.street, false),
+      houseNumber: cleanHouse,
+      orientationNumber: cleanOrient,
+      postalCode: cleanPsc
     };
 
     let updatedProps: Property[];
@@ -1018,7 +1104,8 @@ export default function App() {
       idDocumentNumber: '',
       documentIssuerCountry: 'DEU',
       visaNumber: '',
-      purposeOfStay: '1',
+      purposeOfStay: '10',
+      note: '',
       dateArrival: today,
       dateDeparture: tomorrow,
       nights: 1
@@ -1043,7 +1130,8 @@ export default function App() {
       idDocumentNumber: g.idDocumentNumber || '',
       documentIssuerCountry: normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
       visaNumber: g.visaNumber || '',
-      purposeOfStay: g.purposeOfStay || '1',
+      purposeOfStay: normalizePurposeCode(g.purposeOfStay || '10'),
+      note: g.note || '',
       dateArrival: parseDateToISO(g.dateArrival),
       dateDeparture: parseDateToISO(g.dateDeparture),
       nights: g.nights || 1
@@ -1056,8 +1144,8 @@ export default function App() {
     e.preventDefault();
     if (!activeProperty) return;
 
-    if (!guestForm.lastName.trim() || !guestForm.firstName.trim()) {
-      showToast('Vyplňte prosím jméno a příjmení hosta.', 'warning');
+    if (!guestForm.lastName.trim()) {
+      showToast('Vyplňte prosím příjmení hosta.', 'warning');
       return;
     }
 
@@ -1068,25 +1156,31 @@ export default function App() {
     const guestId = editingGuest ? editingGuest.id : `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const nights = Math.max(1, parseInt(String(guestForm.nights)) || 1);
 
+    const cleanFirst = cleanCp1250Name(guestForm.firstName);
+    const cleanLast = cleanCp1250Name(guestForm.lastName);
+    const cleanCity = cleanCp1250Bydliste(guestForm.city);
+    const cleanStreet = cleanCp1250Bydliste(guestForm.street);
+
     const guestRecord: Guest = {
       id: guestId,
       propertyId: activeProperty.id,
       unit: guestForm.unit.trim(),
       airbnbCode: guestForm.airbnbCode.trim().toUpperCase(),
-      firstName: cleanAsciiUpper(guestForm.firstName),
-      lastName: cleanAsciiUpper(guestForm.lastName),
-      fullName: `${cleanAsciiUpper(guestForm.firstName)} ${cleanAsciiUpper(guestForm.lastName)}`.trim(),
+      firstName: cleanFirst,
+      lastName: cleanLast,
+      fullName: `${cleanFirst} ${cleanLast}`.trim(),
       birthDate: guestForm.birthDate,
       nationality: nat,
       residenceCountry: resC,
-      city: cleanAsciiUpper(guestForm.city),
-      street: cleanAsciiUpper(guestForm.street),
-      address: `${cleanAsciiUpper(guestForm.street)} ${cleanAsciiUpper(guestForm.city)}`.trim(),
+      city: cleanCity,
+      street: cleanStreet,
+      address: `${cleanStreet}${cleanStreet && cleanCity ? ', ' : ''}${cleanCity}`.trim(),
       idDocumentType: cleanAsciiUpper(guestForm.idDocumentType) === 'OP' ? 'OP' : 'PAS',
-      idDocumentNumber: cleanAsciiUpper(guestForm.idDocumentNumber).replace(/\s/g, ''),
+      idDocumentNumber: cleanAsciiUpper(guestForm.idDocumentNumber).replace(/[^A-Z0-9]/g, ''),
       documentIssuerCountry: issC,
-      visaNumber: cleanAsciiUpper(guestForm.visaNumber).replace(/\s/g, ''),
-      purposeOfStay: guestForm.purposeOfStay || '1',
+      visaNumber: sanitizeCp1250Field(guestForm.visaNumber, false).replace(/[^a-zA-Z0-9]/g, ''),
+      purposeOfStay: normalizePurposeCode(guestForm.purposeOfStay || '10'),
+      note: sanitizeCp1250Field(guestForm.note, true),
       dateArrival: guestForm.dateArrival,
       dateDeparture: guestForm.dateDeparture,
       nights,
@@ -1142,12 +1236,14 @@ export default function App() {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const content = event.target?.result as string;
-      if (content) {
-        processImportedUnlText(content);
+      const buf = event.target?.result;
+      if (buf instanceof ArrayBuffer) {
+        processImportedUnlText(decodeUnlBuffer(buf));
+      } else if (typeof buf === 'string' && buf) {
+        processImportedUnlText(buf);
       }
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
     e.target.value = '';
   };
 
@@ -1161,6 +1257,7 @@ export default function App() {
     setUnlImportRawText(rawText);
     setUnlImportParsedGuests(parsed.importedGuests);
     setUnlImportDetectedFacility(parsed.detectedFacility || null);
+    setUnlImportDetectedProperty(parsed.detectedProperty || null);
     setIsUnlImportModalOpen(true);
   };
 
@@ -1173,16 +1270,51 @@ export default function App() {
     let targetProp = activeProperty;
     let updatedProps = [...properties];
 
-    // Pokud nemáme ubytování a UNL obsahuje IDUB a zkratku, vytvoříme ho nebo aktualizujeme
-    if (unlImportDetectedFacility) {
-      if (!targetProp) {
+    // Pokud UNL obsahuje záznam A (nebo IDUB+zkratku), najdeme shodu nebo vytvoříme / doplníme ubytování
+    if (unlImportDetectedProperty || unlImportDetectedFacility) {
+      const detIdub = unlImportDetectedProperty?.idub || unlImportDetectedFacility?.idub || '';
+      const detCode = unlImportDetectedProperty?.facilityCode || unlImportDetectedFacility?.facilityCode || '';
+
+      const matched = updatedProps.find(
+        p =>
+          (detIdub && cleanAsciiUpper(p.idub) === detIdub) ||
+          (detCode && cleanAsciiUpper(p.facilityCode) === detCode)
+      );
+
+      if (matched) {
+        targetProp = {
+          ...matched,
+          idub: matched.idub || detIdub,
+          facilityCode: matched.facilityCode || detCode,
+          contact: matched.contact || unlImportDetectedProperty?.contact || '',
+          district: matched.district || unlImportDetectedProperty?.district || '',
+          municipality: matched.municipality || unlImportDetectedProperty?.municipality || '',
+          cityPart: matched.cityPart || unlImportDetectedProperty?.cityPart || '',
+          street: matched.street || unlImportDetectedProperty?.street || '',
+          houseNumber: matched.houseNumber || unlImportDetectedProperty?.houseNumber || '',
+          orientationNumber: matched.orientationNumber || unlImportDetectedProperty?.orientationNumber || '',
+          postalCode: matched.postalCode || unlImportDetectedProperty?.postalCode || ''
+        };
+        updatedProps = updatedProps.map(p => p.id === targetProp!.id ? targetProp! : p);
+        setProperties(updatedProps);
+        setActivePropertyId(targetProp.id);
+      } else if (!targetProp || unlImportDetectedProperty?.name) {
         targetProp = {
           id: `prop_${Date.now()}`,
-          name: `Ubytování ${unlImportDetectedFacility.facilityCode}`,
-          idub: unlImportDetectedFacility.idub,
-          facilityCode: unlImportDetectedFacility.facilityCode,
-          hostName: '',
-          address: 'Praha'
+          name: unlImportDetectedProperty?.name || `Ubytování ${detCode}`,
+          idub: detIdub,
+          facilityCode: detCode,
+          hostName: unlImportDetectedProperty?.hostName || '',
+          address: unlImportDetectedProperty?.address || 'Praha',
+          districtKey: unlImportDetectedProperty?.districtKey || 'praha8',
+          contact: unlImportDetectedProperty?.contact || '',
+          district: unlImportDetectedProperty?.district || '',
+          municipality: unlImportDetectedProperty?.municipality || '',
+          cityPart: unlImportDetectedProperty?.cityPart || '',
+          street: unlImportDetectedProperty?.street || '',
+          houseNumber: unlImportDetectedProperty?.houseNumber || '',
+          orientationNumber: unlImportDetectedProperty?.orientationNumber || '',
+          postalCode: unlImportDetectedProperty?.postalCode || ''
         };
         updatedProps.push(targetProp);
         setProperties(updatedProps);
@@ -1190,8 +1322,8 @@ export default function App() {
       } else if (!targetProp.idub || !targetProp.facilityCode) {
         targetProp = {
           ...targetProp,
-          idub: targetProp.idub || unlImportDetectedFacility.idub,
-          facilityCode: targetProp.facilityCode || unlImportDetectedFacility.facilityCode
+          idub: targetProp.idub || detIdub,
+          facilityCode: targetProp.facilityCode || detCode
         };
         updatedProps = updatedProps.map(p => p.id === targetProp!.id ? targetProp! : p);
         setProperties(updatedProps);
@@ -1223,15 +1355,22 @@ export default function App() {
     setActiveTab('ledger');
   };
 
-  // UNL EXPORT HANDLERS
+  // UNL EXPORT HANDLERS (striktní brána kvality dle PDF)
   const handleDownloadUnl = () => {
     if (!activeProperty) {
       showToast('Vyberte ubytovací zařízení pro export UNL.', 'warning');
       return;
     }
     const result = buildUnlFile(activeGuests, activeProperty);
-    if (!result.content || result.includedCount === 0) {
-      showToast('V knize nejsou žádní způsobilí cizinci k exportu.', 'warning');
+    if (result.includedCount === 0) {
+      showToast('V tomto ubytování nejsou žádní způsobilí cizinci k exportu.', 'warning');
+      return;
+    }
+    if (!result.canDownload) {
+      showToast(
+        'Stažení UNL je zablokováno: nejprve opravte všechny chyby v záznamu A a záznamech U.',
+        'warning'
+      );
       return;
     }
 
@@ -1240,18 +1379,21 @@ export default function App() {
     const filename = `${safeCode}_${dateStr}.unl`;
 
     downloadUnlFile(result.content, filename);
-    showToast(`Soubor ${filename} byl stažen (${result.includedCount} cizinců).`, 'success');
+    showToast(`Soubor ${filename} byl stažen v CP1250 (záznam A + ${result.includedCount}× U).`, 'success');
   };
 
   const handleCopyUnlToClipboard = () => {
     if (!activeProperty) return;
     const result = buildUnlFile(activeGuests, activeProperty);
-    if (!result.content) {
-      showToast('Žádná data k exportu.', 'warning');
+    if (!result.canDownload) {
+      showToast(
+        'Kopírování je zablokováno: opravte prosím chyby validace nebo přidejte cizince.',
+        'warning'
+      );
       return;
     }
     navigator.clipboard.writeText(result.content);
-    showToast(`UNL zkopírován do schránky (${result.includedCount} řádků).`, 'success');
+    showToast(`UNL zkopírován do schránky (záznam A + ${result.includedCount} řádků U).`, 'success');
   };
 
   // Cancel scanning in progress
@@ -1270,14 +1412,18 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Pokud uživatel nahrál .unl soubor
+    // Pokud uživatel nahrál .unl soubor (dekódování CP1250 / UTF-8)
     if (file.name.toLowerCase().endsWith('.unl')) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        const text = event.target?.result as string;
-        if (text) processImportedUnlText(text);
+        const buf = event.target?.result;
+        if (buf instanceof ArrayBuffer) {
+          processImportedUnlText(decodeUnlBuffer(buf));
+        } else if (typeof buf === 'string' && buf) {
+          processImportedUnlText(buf);
+        }
       };
-      reader.readAsText(file);
+      reader.readAsArrayBuffer(file);
       e.target.value = '';
       return;
     }
@@ -1513,15 +1659,24 @@ export default function App() {
     let updatedProps = [...properties];
 
     if (scanTargetChoice === 'new') {
+      const parsedAddr = parseCzechAddress(scanNewPropForm.address, scanNewPropForm.districtKey);
       const newProp: Property = {
         id: `prop_${Date.now()}`,
-        name: scanNewPropForm.name.trim() || 'Nové ubytování',
+        name: sanitizeCp1250Field(scanNewPropForm.name || 'Nové ubytování', false),
         idub: cleanAsciiUpper(scanNewPropForm.idub).replace(/\s/g, ''),
         facilityCode: cleanAsciiUpper(scanNewPropForm.facilityCode).replace(/\s/g, '').substring(0, 5),
         hostName: scanNewPropForm.hostName.trim(),
         address: scanNewPropForm.address.trim(),
         districtKey: scanNewPropForm.districtKey || 'praha8',
-        variableSymbol: scanNewPropForm.variableSymbol.trim()
+        variableSymbol: scanNewPropForm.variableSymbol.trim(),
+        contact: sanitizeCp1250Field(scanNewPropForm.hostName, false),
+        district: parsedAddr.district,
+        municipality: parsedAddr.municipality,
+        cityPart: parsedAddr.cityPart,
+        street: parsedAddr.street,
+        houseNumber: parsedAddr.houseNumber,
+        orientationNumber: parsedAddr.orientationNumber,
+        postalCode: parsedAddr.postalCode
       };
       updatedProps.push(newProp);
       targetPropId = newProp.id;
@@ -1546,25 +1701,31 @@ export default function App() {
         street = parsed.street;
       }
 
+      const cleanFirst = cleanCp1250Name(g.firstName);
+      const cleanLast = cleanCp1250Name(g.lastName);
+      const cleanCity = cleanCp1250Bydliste(city);
+      const cleanStreet = cleanCp1250Bydliste(street);
+
       return {
         id: `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         propertyId: targetPropId,
         unit: (unit || g.unit || '1').trim(),
         airbnbCode: '',
-        firstName: cleanAsciiUpper(g.firstName),
-        lastName: cleanAsciiUpper(g.lastName),
-        fullName: `${cleanAsciiUpper(g.firstName)} ${cleanAsciiUpper(g.lastName)}`.trim(),
+        firstName: cleanFirst,
+        lastName: cleanLast,
+        fullName: `${cleanFirst} ${cleanLast}`.trim(),
         birthDate: g.birthDate || '',
         nationality: nat,
         residenceCountry: resC,
-        city: cleanAsciiUpper(city),
-        street: cleanAsciiUpper(street),
-        address: `${cleanAsciiUpper(street)} ${cleanAsciiUpper(city)}`.trim(),
+        city: cleanCity,
+        street: cleanStreet,
+        address: `${cleanStreet}${cleanStreet && cleanCity ? ', ' : ''}${cleanCity}`.trim(),
         idDocumentType: cleanAsciiUpper(g.documentType) === 'OP' ? 'OP' : 'PAS',
-        idDocumentNumber: cleanAsciiUpper(g.passportNumber || g.idDocumentNumber || '').replace(/\s/g, ''),
+        idDocumentNumber: cleanAsciiUpper(g.passportNumber || g.idDocumentNumber || '').replace(/[^A-Z0-9]/g, ''),
         documentIssuerCountry: issC,
-        visaNumber: cleanAsciiUpper(g.visaNumber || '').replace(/\s/g, ''),
-        purposeOfStay: String(g.purposeOfStay || '1').match(/^\d/)?.[0] || '1',
+        visaNumber: sanitizeCp1250Field(g.visaNumber || '', false).replace(/[^a-zA-Z0-9]/g, ''),
+        purposeOfStay: normalizePurposeCode(g.purposeOfStay || '10'),
+        note: '',
         dateArrival,
         dateDeparture,
         nights,
@@ -2561,14 +2722,14 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: EXPORT UNL (REPLACES ODVOD QR) */}
+        {/* TAB 3: EXPORT UNL (1 UBYTOVÁNÍ = ZÁZNAM A + JEHO HOSTÉ = ZÁZNAMY U) */}
         {activeTab === 'export' && (
           <div className="space-y-4">
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 rounded-3xl border border-slate-800 p-5 space-y-4 shadow-xl">
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400">
-                    UbyPort 2.0 • Evidence cizinců
+                    UbyPort 2.0 • Příloha č. 3 (A + U)
                   </span>
                   <h2 className="text-base font-bold text-white">Export UNL souboru</h2>
                 </div>
@@ -2578,83 +2739,206 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Status ubytovacího zařízení */}
-              {activeProperty ? (
-                <div className="bg-slate-950/60 rounded-2xl p-3.5 border border-slate-800 text-xs space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-slate-800/60 pb-2">
-                    <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-semibold">Ubytovací zařízení:</span>
-                      <p className="font-bold text-white text-sm">{activeProperty.name}</p>
-                    </div>
-                    <button
-                      onClick={() => openEditPropertyModal(activeProperty)}
-                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-750 text-blue-400 rounded-lg text-[11px] font-semibold tap-active"
-                    >
-                      Upravit kódy
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 font-mono">
-                    <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block font-sans">IDUB ubytovacího zařízení:</span>
-                      <p className={`text-xs font-bold tracking-wider mt-0.5 ${activeProperty.idub ? 'text-emerald-400' : 'text-amber-400'}`}>
-                        {activeProperty.idub || 'CHYBÍ IDUB!'}
-                      </p>
-                    </div>
-                    <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block font-sans">Zkratka zařízení:</span>
-                      <p className={`text-xs font-bold tracking-wider mt-0.5 ${activeProperty.facilityCode ? 'text-blue-400' : 'text-amber-400'}`}>
-                        {activeProperty.facilityCode || 'CHYBÍ KÓD!'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {(!activeProperty.idub || !activeProperty.facilityCode) && (
-                    <div className="p-2.5 rounded-xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-[11px] flex items-center gap-2">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                      <span>Pro úspěšný import do UbyPortu musíte zadat IDUB a 5místnou zkratku zařízení.</span>
-                    </div>
-                  )}
-
-                  {activeUnlResult.excludedCzechCount > 0 && (
-                    <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 text-[11px] flex items-center justify-between">
-                      <span>Vyloučeno občanů ČR (nehlásí se):</span>
-                      <span className="font-bold text-amber-400">{activeUnlResult.excludedCzechCount}</span>
-                    </div>
-                  )}
+              {/* VÝBĚR JEDNOHO UBYTOVÁNÍ PŘÍMO NA KARTĚ EXPORT */}
+              {properties.length > 0 ? (
+                <div className="bg-slate-950/80 rounded-2xl p-3.5 border border-slate-800 space-y-2">
+                  <label htmlFor="export-property-select" className="block text-[11px] text-slate-300 font-bold">
+                    Vyberte ubytování pro export UNL (1 soubor = 1 ubytování + jeho hosté):
+                  </label>
+                  <select
+                    id="export-property-select"
+                    value={activeProperty?.id || ''}
+                    onChange={e => handleSwitchActiveProperty(e.target.value)}
+                    className="w-full min-h-[44px] bg-slate-900 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs font-semibold focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
+                  >
+                    {properties.map(p => {
+                      const foreignCnt = guests.filter(
+                        g => g.propertyId === p.id && !isCzechCitizen(g.nationality)
+                      ).length;
+                      return (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.facilityCode || 'bez zkratky'} • {foreignCnt} cizinců k hlášení)
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <p className="text-[11px] text-slate-400 leading-snug">
+                    Přepnutí výběru přepne aktivní ubytování v aplikaci a do souboru vyexportuje záznam <strong>A</strong> tohoto ubytování a výhradně jeho hlášené cizince <strong>U</strong>.
+                  </p>
                 </div>
               ) : (
-                <p className="text-xs text-slate-400 text-center py-2">
-                  Přidejte nebo vyberte ubytovací zařízení pro generování UNL.
-                </p>
+                <div className="bg-slate-950/60 rounded-2xl p-4 border border-slate-800 text-center space-y-2.5">
+                  <p className="text-xs text-slate-400">
+                    Zatím nemáte žádné ubytovací zařízení pro generování záznamu typu A.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openNewPropertyModal}
+                    className="min-h-[44px] px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
+                  >
+                    Přidat ubytovací zařízení
+                  </button>
+                </div>
               )}
+
+              {/* Status vybraného ubytovacího zařízení (Záznam A) */}
+              {activeProperty && (() => {
+                const resolvedA = resolvePropertyTypeAFields(activeProperty);
+                const addrSummary = [
+                  [resolvedA.ulice, [resolvedA.cisloDomovni, resolvedA.cisloOrientacni].filter(Boolean).join('/')].filter(Boolean).join(' '),
+                  [resolvedA.psc, resolvedA.obec, resolvedA.okres ? `(${resolvedA.okres})` : ''].filter(Boolean).join(' ')
+                ].filter(Boolean).join(', ');
+
+                return (
+                  <div className="bg-slate-950/60 rounded-2xl p-3.5 border border-slate-800 text-xs space-y-3">
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-800/60 pb-2.5">
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold">Záznam typu A (16 polí):</span>
+                        <p className="font-bold text-white text-sm truncate">{activeProperty.name}</p>
+                        <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                          {addrSummary || activeProperty.address || 'Doplňte strukturovanou adresu pro záznam A'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => openEditPropertyModal(activeProperty)}
+                        className="min-h-[44px] px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-blue-400 rounded-xl text-xs font-semibold tap-active whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Upravit záznam A
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 font-mono">
+                      <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
+                        <span className="text-[10px] text-slate-400 uppercase block font-sans">IDUB (12–14 znaků):</span>
+                        <p className={`text-xs font-bold tracking-wider mt-0.5 truncate ${resolvedA.idub ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {resolvedA.idub || 'CHYBÍ IDUB!'}
+                        </p>
+                      </div>
+                      <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
+                        <span className="text-[10px] text-slate-400 uppercase block font-sans">Zkratka (5 znaků):</span>
+                        <p className={`text-xs font-bold tracking-wider mt-0.5 truncate ${resolvedA.facilityCode ? 'text-blue-400' : 'text-rose-400'}`}>
+                          {resolvedA.facilityCode || 'CHYBÍ KÓD!'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Chyby záznamu A */}
+                    {!activeUnlResult.propertyValidation.isValid && (
+                      <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-[11px] space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 font-bold text-rose-300">
+                          <span className="flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                            Chyby v hlavičce ubytování (záznam A):
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => openEditPropertyModal(activeProperty)}
+                            className="text-sky-300 hover:underline whitespace-nowrap cursor-pointer"
+                          >
+                            Opravit
+                          </button>
+                        </div>
+                        <ul className="list-disc list-inside space-y-0.5 text-rose-200/90">
+                          {activeUnlResult.propertyValidation.errors.map((err, i) => (
+                            <li key={i}>{err}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Doporučení pro záznam A */}
+                    {activeUnlResult.propertyValidation.isValid && activeUnlResult.propertyValidation.warnings.length > 0 && (
+                      <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 text-[11px] flex items-start gap-2">
+                        <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>{activeUnlResult.propertyValidation.warnings.join(' ')}</span>
+                      </div>
+                    )}
+
+                    {/* Chyby hostů (záznamy U) */}
+                    {activeUnlResult.guestIssues.length > 0 && (
+                      <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-[11px] space-y-2">
+                        <div className="flex items-center gap-1.5 font-bold text-rose-300">
+                          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                          <span>Chyby u hlášených hostů (záznam U – {activeUnlResult.guestIssues.length}):</span>
+                        </div>
+                        <div className="space-y-2 max-h-48 overflow-y-auto no-scrollbar">
+                          {activeUnlResult.guestIssues.map(({ guest, errors }) => (
+                            <div key={guest.id} className="bg-slate-950/70 border border-rose-500/30 rounded-xl p-2.5 flex items-start justify-between gap-2">
+                              <div className="min-w-0 space-y-0.5">
+                                <p className="font-bold text-white truncate">
+                                  {guest.lastName || 'BEZ PŘÍJMENÍ'} {guest.firstName} ({guest.nationality || '?'})
+                                </p>
+                                <p className="text-rose-200/90 leading-snug">{errors.join(' • ')}</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openEditGuestModal(guest)}
+                                className="min-h-[36px] px-2.5 py-1 bg-slate-800 hover:bg-slate-750 text-sky-300 rounded-lg font-semibold shrink-0 whitespace-nowrap cursor-pointer"
+                              >
+                                Opravit hosta
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {activeUnlResult.excludedCzechCount > 0 && (
+                      <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 text-[11px] flex items-center justify-between">
+                        <span>Vyloučeno občanů ČR (nehlásí se):</span>
+                        <span className="font-bold text-amber-400">{activeUnlResult.excludedCzechCount}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* UNL FILE PREVIEW CONTAINER */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center justify-between text-xs gap-2">
                   <span className="font-bold text-slate-300 flex items-center gap-1.5">
                     <FileText className="w-3.5 h-3.5 text-blue-400" />
-                    Náhled UNL souboru (formát UbyPort 2.0)
+                    Náhled UNL souboru (1× A + {activeUnlResult.includedCount}× U)
                   </span>
-                  <span className="text-[10px] text-slate-400 font-mono">ASCII / CRLF / Pipe |</span>
+                  <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">CP1250 / CRLF / 16 polí</span>
                 </div>
 
                 <div className="bg-slate-950 rounded-2xl p-3 border border-slate-800 font-mono text-[11px] text-slate-300 leading-relaxed overflow-x-auto max-h-48 no-scrollbar whitespace-pre select-all">
                   {activeUnlResult.content ? (
                     activeUnlResult.content
                   ) : (
-                    <span className="text-slate-600 italic">Žádná data pro export. Přidejte hosty se zahraniční státní příslušností.</span>
+                    <span className="text-slate-600 italic">Žádná data pro export. Vyberte ubytování a přidejte hosty se zahraniční státní příslušností.</span>
                   )}
                 </div>
               </div>
 
-              {/* ACTION BUTTONS: STÁHNOUT UNL, KOPÍROVAT, IMPORT UNL */}
+              {/* STRIKTNÍ VALIDACE: ZPRÁVA KDYŽ JE EXPORT BLOKOVÁN */}
+              {activeProperty && !activeUnlResult.canDownload && (
+                <div className="p-2.5 rounded-xl bg-slate-950 border border-amber-500/40 text-amber-200 text-[11px] flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    {activeUnlResult.includedCount === 0
+                      ? 'Export vyžaduje alespoň 1 cizince (občané ČR se nehlásí).'
+                      : 'Stažení .UNL je zablokováno, dokud nejsou všechny řádky A a U 100% validní podle PDF.'}
+                  </span>
+                </div>
+              )}
+
+              {activeUnlResult.canDownload && (
+                <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-[11px] flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Záznam A i všechny záznamy U (16 polí) jsou platné. Soubor se stáhne v bajtovém kódování CP1250.</span>
+                </div>
+              )}
+
+              {/* ACTION BUTTONS: STÁHNOUT UNL, KOPÍROVAT */}
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <button
                   type="button"
                   onClick={handleDownloadUnl}
-                  disabled={!activeUnlResult.content || activeUnlResult.includedCount === 0}
-                  className="py-3 px-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active shadow-lg shadow-blue-600/30 cursor-pointer"
+                  disabled={!activeUnlResult.canDownload}
+                  className="min-h-[44px] py-3 px-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active shadow-lg shadow-blue-600/30 cursor-pointer whitespace-nowrap"
                 >
                   <FileDown className="w-4 h-4" />
                   <span>Stáhnout .UNL</span>
@@ -2663,11 +2947,11 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleCopyUnlToClipboard}
-                  disabled={!activeUnlResult.content || activeUnlResult.includedCount === 0}
-                  className="py-3 px-3 bg-slate-800 hover:bg-slate-750 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 tap-active cursor-pointer"
+                  disabled={!activeUnlResult.canDownload}
+                  className="min-h-[44px] py-3 px-3 bg-slate-800 hover:bg-slate-750 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 tap-active cursor-pointer whitespace-nowrap"
                 >
                   <Copy className="w-4 h-4 text-blue-400" />
-                  <span>Kopírovat do schránky</span>
+                  <span>Kopírovat UNL</span>
                 </button>
               </div>
 
@@ -2777,14 +3061,14 @@ export default function App() {
             <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-blue-400 flex items-center gap-1.5">
                 <FileText className="w-3.5 h-3.5" />
-                Specifikace formátu UNL
+                Oficiální specifikace formátu UNL (Příloha č. 3)
               </h3>
               <ul className="text-xs text-slate-300 space-y-1 list-disc list-inside leading-relaxed">
-                <li>Plain-text soubor s příponou <code>.unl</code></li>
-                <li>Oddělovač polí: svislítko <code>|</code> (pipe)</li>
-                <li>Konec řádku: <code>\r\n</code> (CRLF), každý řádek končí znakem <code>|</code></li>
-                <li>Kódování: ASCII / Windows-1250, texty <strong>VELKÝMI PÍSMENY BEZ DIAKRITIKY</strong></li>
-                <li>Kódy států: Vždy přesně 3písmenný ISO 3166-1 alpha-3 kód (např. DEU, SVK, USA, GBR)</li>
+                <li>1. řádek: povinný záznam typu <code>A</code> (1 ubytování – 16 polí vč. formátu <code>2</code>, IDUB, zkratky a adresy)</li>
+                <li>Další řádky: záznamy typu <code>U</code> (ubytovaní cizinci pro toto 1 ubytování – 16 polí vč. 2ciferného účelu pobytu a poznámky)</li>
+                <li>Oddělovač polí: svislítko <code>|</code> (bez koncového <code>|</code>), konce řádků <code>CRLF</code> (<code>\r\n</code>)</li>
+                <li>Kódování: skutečné bajty <strong>CP1250 (Windows-1250)</strong> včetně povolené české a evropské diakritiky</li>
+                <li>Doklad: <code>6–30</code> znaků <code>[A-Z0-9]</code> bez mezer; odjezd musí být po příjezdu (<code>datum do &gt; datum od</code>)</li>
               </ul>
             </div>
 
@@ -2965,29 +3249,31 @@ export default function App() {
               <form onSubmit={handleSaveProperty} className="space-y-3 text-xs">
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">
-                    Název ubytování *
+                    Název ubytování / ubytovatele (max 35 znaků pro typ A) *
                   </label>
                   <input
                     type="text"
                     required
+                    maxLength={35}
                     value={propForm.name}
                     onChange={e => setPropForm(prev => ({ ...prev, name: e.target.value }))}
                     placeholder="např. Karolina Plazza - Karlín"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-slate-400 font-semibold mb-1">
-                      IDUB (kód zařízení) *
+                      IDUB (12–14 znaků) *
                     </label>
                     <input
                       type="text"
+                      maxLength={14}
                       value={propForm.idub}
                       onChange={e => setPropForm(prev => ({ ...prev, idub: e.target.value }))}
                       placeholder="např. CZ1234567890"
-                      className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
                     />
                   </div>
                   <div>
@@ -2999,49 +3285,166 @@ export default function App() {
                       maxLength={5}
                       value={propForm.facilityCode}
                       onChange={e => setPropForm(prev => ({ ...prev, facilityCode: e.target.value }))}
-                      placeholder="např. HOTEL"
-                      className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                      placeholder="např. APART"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">
+                      Hostitel (interní evidence)
+                    </label>
+                    <input
+                      type="text"
+                      value={propForm.hostName}
+                      onChange={e => setPropForm(prev => ({ ...prev, hostName: e.target.value }))}
+                      placeholder="např. Michaela Nováková"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">
+                      Kontakt v UNL (pole 6, max 50)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={50}
+                      value={propForm.contact}
+                      onChange={e => setPropForm(prev => ({ ...prev, contact: e.target.value }))}
+                      placeholder="Tel / e-mail / jméno"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Ubytovatel / Hostitel (Jméno / Firma)
-                  </label>
-                  <input
-                    type="text"
-                    value={propForm.hostName}
-                    onChange={e => setPropForm(prev => ({ ...prev, hostName: e.target.value }))}
-                    placeholder="např. Michaela Nováková"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Adresa v ČR
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-slate-400 font-semibold">
+                      Adresa v ČR (jednolinkový přehled)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleSplitPropertyAddress}
+                      className="text-[11px] text-blue-400 hover:underline font-semibold cursor-pointer"
+                    >
+                      Rozdělit do polí A ↓
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={propForm.address}
                     onChange={e => setPropForm(prev => ({ ...prev, address: e.target.value }))}
                     placeholder="např. Sokolovská 694/102, 186 00 Praha 8"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
+                </div>
+
+                {/* Strukturovaná adresa pro záznam A */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3 space-y-2.5">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400 block">
+                    Strukturovaná adresa pro hlavičku UNL (záznam A)
+                  </span>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">Okres / obvod v Praze</label>
+                      <input
+                        type="text"
+                        maxLength={32}
+                        value={propForm.district}
+                        onChange={e => setPropForm(prev => ({ ...prev, district: e.target.value }))}
+                        placeholder="např. Praha 8"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">PSČ (5 číslic)</label>
+                      <input
+                        type="text"
+                        maxLength={5}
+                        value={propForm.postalCode}
+                        onChange={e => setPropForm(prev => ({ ...prev, postalCode: e.target.value.replace(/\D/g, '').slice(0, 5) }))}
+                        placeholder="18600"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">Obec</label>
+                      <input
+                        type="text"
+                        maxLength={48}
+                        value={propForm.municipality}
+                        onChange={e => setPropForm(prev => ({ ...prev, municipality: e.target.value }))}
+                        placeholder="např. Praha"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">Část obce</label>
+                      <input
+                        type="text"
+                        maxLength={48}
+                        value={propForm.cityPart}
+                        onChange={e => setPropForm(prev => ({ ...prev, cityPart: e.target.value }))}
+                        placeholder="např. Karlín"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2">
+                    <div className="col-span-2">
+                      <label className="block text-slate-400 font-semibold mb-1">Ulice</label>
+                      <input
+                        type="text"
+                        maxLength={48}
+                        value={propForm.street}
+                        onChange={e => setPropForm(prev => ({ ...prev, street: e.target.value }))}
+                        placeholder="např. Sokolovská"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">Č. dom.</label>
+                      <input
+                        type="text"
+                        maxLength={5}
+                        value={propForm.houseNumber}
+                        onChange={e => setPropForm(prev => ({ ...prev, houseNumber: e.target.value }))}
+                        placeholder="694"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-2.5 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 font-semibold mb-1">Č. or.</label>
+                      <input
+                        type="text"
+                        maxLength={4}
+                        value={propForm.orientationNumber}
+                        onChange={e => setPropForm(prev => ({ ...prev, orientationNumber: e.target.value }))}
+                        placeholder="102"
+                        className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-2.5 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 <div className="flex gap-2 pt-2">
                   <button
                     type="button"
                     onClick={() => setPropModalMode('list')}
-                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active"
+                    className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active cursor-pointer"
                   >
                     Zpět
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active"
+                    className="flex-1 min-h-[44px] py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active cursor-pointer"
                   >
                     Uložit ubytování
                   </button>
@@ -3104,28 +3507,29 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">
-                    Příjmení *
+                    Příjmení (1–50, bez titulů) *
                   </label>
                   <input
                     type="text"
                     required
+                    maxLength={50}
                     value={guestForm.lastName}
                     onChange={e => setGuestForm(prev => ({ ...prev, lastName: e.target.value }))}
-                    placeholder="např. MUELLER"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    placeholder="např. MÜLLER / NOVÁK"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
                   />
                 </div>
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">
-                    Jméno *
+                    Jméno (0–24, bez titulů)
                   </label>
                   <input
                     type="text"
-                    required
+                    maxLength={24}
                     value={guestForm.firstName}
                     onChange={e => setGuestForm(prev => ({ ...prev, firstName: e.target.value }))}
-                    placeholder="např. HANS"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    placeholder="např. TOMÁŠ"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
                   />
                 </div>
               </div>
@@ -3338,17 +3742,32 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Poznámka (pole 16 záznamu U) */}
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1">
+                  Poznámka pro UbyPort (pole 16, max 255 znaků)
+                </label>
+                <input
+                  type="text"
+                  maxLength={255}
+                  value={guestForm.note}
+                  onChange={e => setGuestForm(prev => ({ ...prev, note: e.target.value }))}
+                  placeholder="Volitelná poznámka (např. pokoj / poznámka k pobytu)"
+                  className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setIsGuestModalOpen(false)}
-                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active"
+                  className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl font-semibold tap-active cursor-pointer"
                 >
                   Zrušit
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active"
+                  className="flex-1 min-h-[44px] py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active cursor-pointer"
                 >
                   Uložit hosta
                 </button>
@@ -3603,12 +4022,18 @@ export default function App() {
               </button>
             </div>
 
-            {unlImportDetectedFacility && (
+            {(unlImportDetectedProperty || unlImportDetectedFacility) && (
               <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 text-xs space-y-1">
-                <span className="text-[10px] text-slate-400 uppercase font-semibold">Detekované zařízení v souboru:</span>
-                <p className="font-mono text-white font-bold">
-                  IDUB: {unlImportDetectedFacility.idub} • Zkratka: {unlImportDetectedFacility.facilityCode}
+                <span className="text-[10px] text-slate-400 uppercase font-semibold">Detekovaný záznam A v souboru:</span>
+                {unlImportDetectedProperty?.name && (
+                  <p className="font-bold text-white">{unlImportDetectedProperty.name}</p>
+                )}
+                <p className="font-mono text-emerald-400 font-bold">
+                  IDUB: {unlImportDetectedProperty?.idub || unlImportDetectedFacility?.idub || '–'} • Zkratka: {unlImportDetectedProperty?.facilityCode || unlImportDetectedFacility?.facilityCode || '–'}
                 </p>
+                {unlImportDetectedProperty?.address && (
+                  <p className="text-[11px] text-slate-400">{unlImportDetectedProperty.address}</p>
+                )}
               </div>
             )}
 

@@ -37,12 +37,20 @@ const DATA_FILE = path.join(__dirname, 'data.yaml');
 export interface Property {
   id: string;
   name: string;
-  idub: string;          // IDUB přidělené Policií ČR (např. CZ1234567890)
-  facilityCode: string;  // 5místná zkratka zařízení (např. HOTEL)
+  idub: string;          // IDUB přidělené Policií ČR (12–14 znaků)
+  facilityCode: string;  // 5místná zkratka zařízení
   hostName: string;
   address: string;
   districtKey?: string;
   variableSymbol?: string;
+  contact?: string;
+  district?: string;
+  municipality?: string;
+  cityPart?: string;
+  street?: string;
+  houseNumber?: string;
+  orientationNumber?: string;
+  postalCode?: string;
 }
 
 export interface Guest {
@@ -64,6 +72,7 @@ export interface Guest {
   documentIssuerCountry?: string;
   visaNumber?: string;
   purposeOfStay: string;
+  note?: string;
   dateArrival: string;
   dateDeparture: string;
   nights: number;
@@ -150,7 +159,24 @@ app.get('/api/data', (_req, res) => {
 // 2. Add or update property
 app.post('/api/properties', (req, res) => {
   const data = loadData();
-  const { id, name, idub, facilityCode, hostName, address, districtKey, variableSymbol } = req.body;
+  const {
+    id,
+    name,
+    idub,
+    facilityCode,
+    hostName,
+    address,
+    districtKey,
+    variableSymbol,
+    contact,
+    district,
+    municipality,
+    cityPart,
+    street,
+    houseNumber,
+    orientationNumber,
+    postalCode
+  } = req.body;
 
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Název ubytování je povinný' });
@@ -167,7 +193,15 @@ app.post('/api/properties', (req, res) => {
     hostName: (hostName || '').trim(),
     address: (address || '').trim(),
     districtKey: districtKey || 'praha8',
-    variableSymbol: (variableSymbol || '').trim()
+    variableSymbol: (variableSymbol || '').trim(),
+    contact: (contact || '').trim(),
+    district: (district || '').trim(),
+    municipality: (municipality || '').trim(),
+    cityPart: (cityPart || '').trim(),
+    street: (street || '').trim(),
+    houseNumber: (houseNumber || '').trim().toUpperCase(),
+    orientationNumber: (orientationNumber || '').trim().toUpperCase(),
+    postalCode: (postalCode || '').replace(/\s/g, '')
   };
 
   if (existingIdx >= 0) {
@@ -234,7 +268,8 @@ app.post('/api/guests', (req, res) => {
     idDocumentNumber: (g.idDocumentNumber || '').trim(),
     documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
     visaNumber: (g.visaNumber || '').trim(),
-    purposeOfStay: (g.purposeOfStay || '1').trim(),
+    purposeOfStay: (g.purposeOfStay || '10').trim(),
+    note: (g.note || '').trim(),
     dateArrival: g.dateArrival || '',
     dateDeparture: g.dateDeparture || '',
     nights,
@@ -290,7 +325,15 @@ app.post('/api/batch-guests', (req, res) => {
         hostName: property.hostName || '',
         address: property.address || '',
         districtKey: property.districtKey || 'praha8',
-        variableSymbol: property.variableSymbol || ''
+        variableSymbol: property.variableSymbol || '',
+        contact: property.contact || '',
+        district: property.district || '',
+        municipality: property.municipality || '',
+        cityPart: property.cityPart || '',
+        street: property.street || '',
+        houseNumber: property.houseNumber || '',
+        orientationNumber: property.orientationNumber || '',
+        postalCode: property.postalCode || ''
       };
       data.properties.push(newProp);
       if (!data.meta.activePropertyId) {
@@ -320,7 +363,8 @@ app.post('/api/batch-guests', (req, res) => {
         idDocumentNumber: (g.idDocumentNumber || '').trim(),
         documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
         visaNumber: (g.visaNumber || '').trim(),
-        purposeOfStay: (g.purposeOfStay || '1').trim(),
+        purposeOfStay: (g.purposeOfStay || '10').trim(),
+        note: (g.note || '').trim(),
         dateArrival: g.dateArrival || '',
         dateDeparture: g.dateDeparture || '',
         nights,
@@ -458,8 +502,8 @@ Struktura formuláře:
    - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
    - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
-     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY bez diakritiky (např. KINKAID).
-     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY bez diakritiky (např. KENNETH).
+     * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. NOVÁK nebo MÜLLER).
+     * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. JAN nebo TOMÁŠ).
      * birthDate: Datum narození ze sloupce 'datum narození / Date of birth' ve formátu ISO YYYY-MM-DD (např. '01.10.1971' -> '1971-10-01').
      * nationality: Státní příslušnost / občanství ze sloupce 'státní občanství / Citizenship'.
        KRITICKÉ: VŽDY převeď na 3místný ISO 3166-1 alpha-3 kód.
@@ -469,13 +513,13 @@ Struktura formuláře:
        Pokud je 'CZ' nebo 'Česká', 'CZE'.
        Pokud je 'SK' nebo 'Slovensko', 'SVK'.
      * passportNumber: Číslo cestovního pasu nebo OP ze sloupce 'č. cestovního dokladu / Passport No'.
-       KRITICKÉ: Pokud je ve sloupci cokoliv napsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
+       KRITICKÉ: Pokud je ve sloupci cokoliv zapsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
      * documentType: 'OP' pro občanský průkaz (ID card), 'PAS' pro cestovní pas. Pokud není zřejmé, použij 'PAS'.
      * homeAddress: Celá adresa ze sloupce 'trvalé bydliště v zahraničí / Home Address' (např. '6917 S Queen St, Littleton Co').
      * city: Město trvalého bydliště z adresy (např. 'Littleton').
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
      * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
-     * purposeOfStay: Číslo účelu pobytu dle zaškrtnutého checkboxu (1 = turistika / leisure, 2 = zaměstnání / práce, 3 = studium, 4 = obchod, 5 = léčení, 6 = ostatní).
+     * purposeOfStay: Dvouciferný kód účelu pobytu dle číselníku Ubyport (10 = turistika / leisure, 01 = obchod, 27 = zaměstnání / práce, 11 = studium, 00 = zdravotní / léčení, 03 = návštěva rodiny/přátel, 07 = sportovní, 99 = ostatní).
 `;
 
     const targetModel = (preferredModel || '').replace(/^models\//, '').trim();
