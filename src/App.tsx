@@ -2013,16 +2013,13 @@ export default function App() {
       <header className="header-sharp bg-[#0D131F]/95 border-b border-slate-800/80 px-3.5 sm:px-5 py-2 z-30 shrink-0 backdrop-blur-md">
         {/* ROW 1: Název aplikace UbyExport (umístěný nad levou ikonou) + Google Disk & Nastavení */}
         <div className="flex items-center justify-between gap-2 pb-1.5">
-          {/* Vlevo nahoře: Název aplikace UbyExport a verze (nad ikonou) */}
+          {/* Vlevo nahoře: Název aplikace UbyExport 2.5 */}
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-white flex items-center gap-1">
               <span className="bg-gradient-to-r from-white via-slate-100 to-sky-300 bg-clip-text text-transparent">
-                UbyExport
+                UbyExport 2.5
               </span>
             </h1>
-            <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">
-              UbyPort 2.0 · v2.4
-            </span>
           </div>
 
           {/* Vpravo nahoře: Stav připojení Google Disk & Tlačítko Nastavení */}
@@ -3105,7 +3102,7 @@ export default function App() {
             </div>
 
             <div className="pt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
-              <span>Verze: v2.4 (UNL A+U · CP1250)</span>
+              <span>Verze: UbyExport 2.5 (UNL A+U · CP1250)</span>
               <span>Sestaveno: {typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : 'dev'}</span>
             </div>
           </div>

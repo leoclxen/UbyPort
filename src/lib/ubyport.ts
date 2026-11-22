@@ -1368,17 +1368,21 @@ export function parseUnlContent(
 }
 
 /**
- * Spustí stažení .unl souboru v prohlížeči se skutečným bajtovým kódováním CP1250 (Windows-1250)
+ * Spustí stažení .unl souboru v prohlížeči se skutečným bajtovým kódováním CP1250 (Windows-1250).
+ * Používá MIME typ application/octet-stream, aby iOS Safari ani prohlížeče nepřidávaly příponu .txt.
  */
 export function downloadUnlFile(content: string, filename: string = 'ubyport_export.unl'): void {
+  const safeFilename = filename.toLowerCase().endsWith('.unl') ? filename : `${filename}.unl`;
   const bytes = encodeWin1250(content);
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'text/plain;charset=windows-1250' });
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = filename;
+  link.download = safeFilename;
+  link.setAttribute('download', safeFilename);
+  link.style.display = 'none';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
