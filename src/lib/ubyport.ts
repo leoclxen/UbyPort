@@ -1,5 +1,5 @@
 /**
- * UbyPort 2.0 (Ředitelství služby cizinecké policie ČR)
+ * UbyPort (Ředitelství služby cizinecké policie ČR)
  * Oficiální specifikace dle Přílohy č. 3 Provozního řádu IA Ubyport (aktualizace 22.02.2018)
  *
  * - Záznam typu A (hlavička ubytovacího zařízení): 1. řádek, 16 polí oddělených '|'
@@ -546,7 +546,7 @@ export function formatExportTimestamp(date: Date = new Date()): string {
 
 /**
  * Zkontroluje, zda je host občanem ČR (CZE / CZ).
- * Dle pravidel UbyPort 2.0 se občané ČR cizinecké policii NEHLÁSÍ!
+ * Dle pravidel UbyPort se občané ČR cizinecké policii NEHLÁSÍ!
  */
 export function isCzechCitizen(nationality?: string): boolean {
   if (!nationality) return false;

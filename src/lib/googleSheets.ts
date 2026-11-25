@@ -14,7 +14,7 @@ export interface SheetDataPayload {
   preferredModel?: string;
 }
 
-const DEFAULT_TITLE = 'UbyPort 2.0 - Evidence cizinců';
+const DEFAULT_TITLE = 'UbyExport - Evidence cizinců';
 
 // Záhlaví 4 listů v Google Sešitu
 const HEADERS = {
@@ -65,7 +65,7 @@ export async function findOrCreateAirTaxSpreadsheet(
   // 2. Hledání na Disku existujícího souboru s názvem DEFAULT_TITLE nebo starým názvem
   try {
     const driveQuery = encodeURIComponent(
-      `name='${DEFAULT_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`
+      `(name='${DEFAULT_TITLE}' or name='UbyPort 2.0 - Evidence cizinců') and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`
     );
     const driveRes = await fetch(
       `https://www.googleapis.com/drive/v3/files?q=${driveQuery}&fields=files(id,name,webViewLink)`,

@@ -15,6 +15,26 @@ const app = express();
 const PORT = 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+function readPackageVersions(): { full: string; short: string } {
+  try {
+    const pkgPath = path.join(__dirname, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const parts = String(pkg.version || '2.0.0')
+      .trim()
+      .split('.')
+      .map((p: string) => p.replace(/[^0-9]/g, ''))
+      .filter(Boolean);
+    const major = parts[0] || '2';
+    const minor = parts[1] || '0';
+    const patch = parts[2] || '0';
+    return { full: `${major}.${minor}.${patch}`, short: `${major}.${minor}` };
+  } catch {
+    return { full: '2.0.0', short: '2.0' };
+  }
+}
+
+const APP_VERSIONS = readPackageVersions();
+
 // Support JSON payloads up to 35MB for high-res mobile photos
 app.use(express.json({ limit: '35mb' }));
 app.use(express.urlencoded({ extended: true, limit: '35mb' }));
@@ -93,8 +113,8 @@ interface AppData {
 function getDefaultData(): AppData {
   return {
     meta: {
-      version: '3.1',
-      description: 'UbyPort 2.0 - Evidence cizinců pro Policii ČR',
+      version: APP_VERSIONS.full,
+      description: `UbyExport ${APP_VERSIONS.short} - Evidence cizinců pro Policii ČR (UbyPort)`,
       lastUpdated: new Date().toISOString(),
       activePropertyId: ''
     },
@@ -111,8 +131,8 @@ function loadData(): AppData {
       if (parsed && typeof parsed === 'object') {
         return {
           meta: parsed.meta || {
-            version: '3.1',
-            description: 'UbyPort 2.0 - Evidence cizinců',
+            version: APP_VERSIONS.full,
+            description: `UbyExport ${APP_VERSIONS.short} - Evidence cizinců (UbyPort)`,
             lastUpdated: new Date().toISOString(),
             activePropertyId: ''
           },
@@ -131,6 +151,7 @@ function loadData(): AppData {
 
 function saveData(data: AppData): void {
   try {
+    data.meta.version = APP_VERSIONS.full;
     data.meta.lastUpdated = new Date().toISOString();
     const yamlStr = jsyaml.dump(data, { indent: 2 });
     fs.writeFileSync(DATA_FILE, yamlStr, 'utf-8');
@@ -412,8 +433,8 @@ app.post('/api/import/yaml', (req, res) => {
 
     const newData: AppData = {
       meta: parsed.meta || {
-        version: '3.1',
-        description: 'UbyPort 2.0 - Evidence cizinců',
+        version: APP_VERSIONS.full,
+        description: `UbyExport ${APP_VERSIONS.short} - Evidence cizinců (UbyPort)`,
         lastUpdated: new Date().toISOString(),
         activePropertyId: ''
       },
@@ -476,7 +497,7 @@ app.post('/api/ocr', async (req, res) => {
     const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '');
 
     const promptInstructions = `
-Jsi špičkový multimodální OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes systém UbyPort 2.0.
+Jsi špičkový multimodální OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes systém UbyPort.
 
 KRITICKÁ PRAVIDLA PRO ORIENTACI OBRÁZKU A ČTENÍ:
 - Tento formulář ("REGISTRATION FORM") může být vyfotografován pod libovolným úhlem: svisle, vodorovně, otočený o 90° doleva/doprava, o 180° vzhůru nohama nebo zešikma.

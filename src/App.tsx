@@ -122,8 +122,12 @@ import {
   SecretFreeConfigNote,
   SheetAuthMode
 } from './lib/configNote';
+import {
+  APP_VERSION_FULL,
+  APP_VERSION_SHORT
+} from './lib/version';
 
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = APP_VERSION_FULL;
 
 /**
  * Detailní ikona naskenovaného ubytovacího lístku / formuláře
@@ -557,7 +561,7 @@ export default function App() {
     try {
       safeStorage.setItem('ubyport_local_yaml', jsyaml.dump({
         meta: {
-          version: '3.1',
+          version: APP_VERSION,
           lastUpdated: new Date().toISOString(),
           activePropertyId: activeId || activePropertyId || props[0]?.id || ''
         },
@@ -699,7 +703,7 @@ export default function App() {
           body: JSON.stringify({
             yamlContent: jsyaml.dump({
               meta: {
-                version: '3.1',
+                version: APP_VERSION,
                 lastUpdated: new Date().toISOString(),
                 activePropertyId: sheetData.properties[0].id
               },
@@ -874,7 +878,7 @@ export default function App() {
           body: JSON.stringify({
             yamlContent: jsyaml.dump({
               meta: {
-                version: '3.1',
+                version: APP_VERSION,
                 lastUpdated: new Date().toISOString(),
                 activePropertyId: nextActiveId
               },
@@ -2357,11 +2361,11 @@ export default function App() {
       <header className="header-sharp bg-[#0D131F]/95 border-b border-slate-800/80 px-3.5 sm:px-5 py-2 z-30 shrink-0 backdrop-blur-md">
         {/* ROW 1: Název aplikace UbyExport (umístěný nad levou ikonou) + Google Disk & Nastavení */}
         <div className="flex items-center justify-between gap-2 pb-1.5">
-          {/* Vlevo nahoře: Název aplikace UbyExport 2.5 */}
+          {/* Vlevo nahoře: Název aplikace UbyExport */}
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-white flex items-center gap-1">
               <span className="bg-gradient-to-r from-white via-slate-100 to-sky-300 bg-clip-text text-transparent">
-                UbyExport 2.5
+                UbyExport {APP_VERSION_SHORT}
               </span>
             </h1>
           </div>
@@ -3072,7 +3076,7 @@ export default function App() {
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400">
-                    UbyPort 2.0 • Příloha č. 3 (A + U)
+                    UbyPort • Příloha č. 3 (A + U)
                   </span>
                   <h2 className="text-base font-bold text-white">Export UNL souboru</h2>
                 </div>
@@ -3380,12 +3384,12 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: LAW & HELP (UBYPORT 2.0 PŘEDPISY) */}
+        {/* TAB 4: LAW & HELP (UBYPORT PŘEDPISY A DOKUMENTACE UBYEXPORT) */}
         {activeTab === 'info' && (
           <div className="rounded-3xl bg-slate-900 border border-slate-800 p-5 space-y-4 shadow-xl">
             <div className="flex items-center gap-2 text-blue-400">
               <ShieldCheck className="w-5 h-5" />
-              <h2 className="text-base font-bold text-white">UbyPort 2.0 • Pravidla evidence a UNL</h2>
+              <h2 className="text-base font-bold text-white">UbyExport {APP_VERSION_FULL} • Pravidla UbyPort a UNL</h2>
             </div>
 
             <div className="space-y-2 border-b border-slate-800 pb-3">
@@ -3410,7 +3414,7 @@ export default function App() {
                 <li>1. řádek: povinný záznam typu <code>A</code> (1 ubytování – 16 polí vč. formátu <code>2</code>, IDUB, zkratky a adresy)</li>
                 <li>Další řádky: záznamy typu <code>U</code> (ubytovaní cizinci pro toto 1 ubytování – 16 polí vč. 2ciferného účelu pobytu a poznámky)</li>
                 <li>Oddělovač polí: svislítko <code>|</code> (bez koncového <code>|</code>), konce řádků <code>CRLF</code> (<code>\r\n</code>)</li>
-                <li>Kódování: skutečné bajty <strong>CP1250 (Windows-1250)</strong> včetně povolené české a evropské diakritiky</li>
+                <li>Kódování: skutečné bajty <strong>CP1250 (Windows-1250)</strong> včetně povolené české a evropské diakritiky; přípona exportu je vždy <code>.unl</code></li>
                 <li>Doklad: <code>6–30</code> znaků <code>[A-Z0-9]</code> bez mezer; odjezd musí být po příjezdu (<code>datum do &gt; datum od</code>)</li>
               </ul>
             </div>
@@ -3418,7 +3422,7 @@ export default function App() {
             <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
                 <Globe className="w-3.5 h-3.5" />
-                Kódy ubytovacího zařízení (IDUB & Zkratka)
+                Kódy ubytovacího zařízení (IDUB &amp; Zkratka)
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
                 Při registraci ubytovatele obdržíte <strong>IDUB</strong> (identifikační číslo ubytovatele) a <strong>5místnou zkratku zařízení</strong> (např. <code>HOTEL</code> nebo <code>APART</code>). Tyto údaje nastavíte v profilu ubytování v aplikaci a budou automaticky vkládány do každého řádku UNL.
@@ -3428,25 +3432,25 @@ export default function App() {
             <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-purple-400 flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5" />
-                Gemini OCR skener lístků
+                Gemini OCR skener lístků &amp; ověření jmen a adres
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Formuláře vyfocené mobilním telefonem jsou bleskově vytěženy multimodálním modelem Gemini Flash. Systém automaticky převede jména do velkých písmen, zachová povolenou českou a evropskou diakritiku CP1250 a namapuje 3místné ISO kódy států.
+                Formuláře vyfocené mobilním telefonem jsou bleskově vytěženy multimodálním modelem Gemini Flash. Systém automaticky převede jména do velkých písmen, zachová povolenou českou a evropskou diakritiku CP1250, namapuje 3místné ISO kódy států a po rozpoznání ověří existenci jména, příjmení i zahraniční či české adresy bydliště (vč. RÚIAN / OpenStreetMap) pro včasné odhalení překlepů z rukopisu.
               </p>
             </div>
 
             <div className="space-y-2 border-b border-slate-800 pb-3">
               <h3 className="text-xs font-bold text-sky-400 flex items-center gap-1.5">
                 <KeyRound className="w-3.5 h-3.5" />
-                Bezpečné uložení API klíčů (Face ID / Klíčenka / KeePass)
+                Klíčenka (Face ID / KeePass), Sheet a Poznámka bez hesel
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                V kódu na GitHub Pages nejsou žádné API klíče a aplikace je neukládá ani do úložiště prohlížeče (<code>localStorage</code>) ani do Google Sheetu. Gemini API klíč si bezpečně uložte do <strong>Klíčenky na iPhonu / Macu (Face ID / Touch ID)</strong> nebo do <strong>KeePassu</strong> na PC. Po automatickém vyplnění zůstává klíč výhradně v operační paměti (RAM) a po zavření karty se automaticky smaže.
+                V kódu aplikace nejsou žádné API klíče a neukládají se do <code>localStorage</code> ani do Google Sheetu – zůstávají výhradně v operační paměti (RAM). Pro prohlížečovou Klíčenku (Apple Hesla / Face ID / KeePass) slouží jeden čistý účet (<code>UbyExport Google API</code>, volitelně druhý záznam <code>UbyExport Firebase</code> při odděleném Firebase klíči). Ostatní nešifrovaná nastavení (aktivní režim Google Sheetu – Veřejný odkaz / OAuth 2.0 / Firebase, URL Sheetu, Client/Project ID, model) lze jedním klikem zkopírovat či obnovit přes <strong>Poznámku bez hesel</strong>.
               </p>
             </div>
 
             <div className="pt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
-              <span>Verze: UbyExport 2.5 (UNL A+U · CP1250)</span>
+              <span>Verze: UbyExport {APP_VERSION_FULL} (UNL A+U · CP1250)</span>
               <span>Sestaveno: {typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : 'dev'}</span>
             </div>
           </div>
@@ -3854,7 +3858,7 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
                 <h3 className="font-bold text-white text-base">
-                  {editingGuest ? 'Upravit cizince' : 'Nový host pro UbyPort 2.0'}
+                  {editingGuest ? 'Upravit cizince' : 'Nový host pro UbyPort'}
                 </h3>
                 <p className="text-[11px] text-slate-400">
                   Ubytování: {activeProperty?.name} (IDUB: {activeProperty?.idub || 'neuveden'})

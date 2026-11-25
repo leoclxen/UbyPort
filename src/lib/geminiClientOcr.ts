@@ -15,7 +15,7 @@ export const CANDIDATE_FLASH_MODELS = [
 ];
 
 export const OCR_PROMPT = `
-Jsi špičkový multimodální OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes systém UbyPort 2.0.
+Jsi špičkový multimodální OCR model pro digitalizaci ubytovacích lístků ("REGISTRATION FORM") a přípravu dat pro hlášení ubytovaných cizinců cizinecké policii ČR přes systém UbyPort.
 
 KRITICKÁ PRAVIDLA PRO ORIENTACI OBRÁZKU A ČTENÍ:
 - Tento formulář ("REGISTRATION FORM") může být vyfotografován pod libovolným úhlem: svisle, vodorovně, otočený o 90° doleva/doprava, o 180° vzhůru nohama nebo zešikma.
