@@ -3449,9 +3449,14 @@ export default function App() {
               </p>
             </div>
 
-            <div className="pt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
-              <span>Verze: UbyExport {APP_VERSION_FULL} (UNL A+U · CP1250)</span>
-              <span>Sestaveno: {typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : 'dev'}</span>
+            <div className="pt-1 space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
+                <span>Verze: UbyExport {APP_VERSION_FULL} (UNL A+U · CP1250)</span>
+                <span>Sestaveno: {typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : 'dev'}</span>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Starší verze kódu a přehled změn jsou na GitHubu archivovány automaticky pod tagy (<code>v{APP_VERSION_FULL}</code>) a v sekci Releases / CHANGELOG.
+              </p>
             </div>
           </div>
         )}

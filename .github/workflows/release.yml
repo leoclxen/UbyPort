@@ -1,0 +1,110 @@
+name: Auto Tag & GitHub Release
+
+on:
+  push:
+    branches: ['main', 'master']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 'release-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from package.json and check existing tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "String(require('./package.json').version || '').trim()")
+          if [ -z "$VERSION" ]; then
+            echo "Missing version in package.json"
+            exit 1
+          fi
+          SHORT_VERSION=$(node -e "const p='${VERSION}'.split('.'); console.log(p.slice(0,2).join('.'))")
+          TAG_NAME="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_version=${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG_NAME} already exists, skipping tag creation."
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        if: steps.meta.outputs.release_exists == 'false'
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const { execSync } = require('child_process');
+
+          const version = process.env.APP_VER;
+          const shortVersion = process.env.APP_SHORT;
+          let notes = '';
+
+          if (fs.existsSync('CHANGELOG.md')) {
+            const raw = fs.readFileSync('CHANGELOG.md', 'utf8').replace(/\r\n/g, '\n');
+            const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const headerRegex = new RegExp(`^##\\s+\\[?v?${escaped}\\]?([^\\n]*)$`, 'm');
+            const match = headerRegex.exec(raw);
+            if (match) {
+              const start = match.index + match[0].length;
+              const rest = raw.slice(start);
+              const nextHeader = rest.search(/^##\s+/m);
+              notes = (nextHeader >= 0 ? rest.slice(0, nextHeader) : rest).trim();
+            }
+          }
+
+          if (!notes) {
+            let commits = '';
+            try {
+              const prevTag = execSync('git describe --tags --abbrev=0 2>/dev/null || true', { encoding: 'utf8' }).trim();
+              const range = prevTag ? `${prevTag}..HEAD` : '-n 10';
+              commits = execSync(`git log ${range} --pretty=format:"- %s (%h)"`, { encoding: 'utf8' }).trim();
+            } catch {}
+            notes = commits
+              ? `### Změny ve verzi ${version}\n\n${commits}`
+              : `Vydání verze UbyExport ${version} (${shortVersion}).`;
+          }
+
+          fs.writeFileSync('release_notes.md', notes + '\n', 'utf8');
+          EOF
+        env:
+          APP_VER: ${{ steps.meta.outputs.version }}
+          APP_SHORT: ${{ steps.meta.outputs.short_version }}
+
+      - name: Create and push Git tag
+        if: steps.meta.outputs.tag_exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.meta.outputs.tag }}" -m "UbyExport ${{ steps.meta.outputs.version }}"
+          git push origin "${{ steps.meta.outputs.tag }}"
+
+      - name: Create GitHub Release
+        if: steps.meta.outputs.release_exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --title "UbyExport ${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.short_version }})" \
+            --notes-file release_notes.md
