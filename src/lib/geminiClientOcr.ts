@@ -9,10 +9,8 @@ import {
 
 export const CANDIDATE_FLASH_MODELS = [
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
+  'gemini-4-hydrogen',
   'gemini-flash-latest',
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.5-pro'
 ];
 
@@ -60,6 +58,12 @@ Struktura formuláře:
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
      * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
      * purposeOfStay: Dvouciferný kód účelu pobytu dle číselníku Ubyport (10 = turistika / leisure, 01 = obchod, 27 = zaměstnání / práce, 11 = studium, 00 = zdravotní / léčení, 03 = návštěva rodiny/přátel, 07 = sportovní, 99 = ostatní).
+     * nameCheck: Jazyková kontrola pravděpodobnosti existence křestního jména a příjmení pro odhalení chyby OCR / špatně čitelného rukopisu:
+       - firstNameValid (boolean): true pokud jde o existující / věrohodné lidské křestní jméno, false pokud vypadá jako zkomolenina.
+       - lastNameValid (boolean): true pokud jde o existující / věrohodné lidské příjmení, false pokud vypadá jako zkomolenina.
+       - suggestedFirstName (string): pokud je rukopis nejasný a existuje pravděpodobnější reálné jméno, uveď jej VELKÝMI PÍSMENY, jinak ''.
+       - suggestedLastName (string): pokud je rukopis nejasný a existuje pravděpodobnější reálné příjmení, uveď jej VELKÝMI PÍSMENY, jinak ''.
+       - reason (string): krátké české vysvětlení případné nejistoty (jinak '').
 
 Vrať čistý JSON s touto strukturou:
 {
@@ -88,7 +92,14 @@ Vrať čistý JSON s touto strukturou:
       "city": "Littleton",
       "street": "6917 S Queen St",
       "visaNumber": "",
-      "purposeOfStay": "10"
+      "purposeOfStay": "10",
+      "nameCheck": {
+        "firstNameValid": true,
+        "lastNameValid": true,
+        "suggestedFirstName": "",
+        "suggestedLastName": "",
+        "reason": ""
+      }
     }
   ]
 }
@@ -113,7 +124,7 @@ export async function runClientGeminiOcr(
   const targetModel = (preferredModel || '').replace(/^models\//, '').trim();
   const isAuto = !targetModel || targetModel === 'auto';
   const modelQueue: string[] = isAuto
-    ? ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-pro']
+    ? ['gemini-2.5-flash', 'gemini-4-hydrogen', 'gemini-flash-latest', 'gemini-2.5-pro']
     : [targetModel];
 
   const payload = {
@@ -275,7 +286,16 @@ export async function runClientGeminiOcr(
         city: cleanCp1250Bydliste(city),
         street: cleanCp1250Bydliste(street),
         purposeOfStay: normalizePurposeCode(g.purposeOfStay),
-        documentType: /ID|OP|CARD/i.test(g.documentType || '') ? 'OP' : 'PAS'
+        documentType: /ID|OP|CARD/i.test(g.documentType || '') ? 'OP' : 'PAS',
+        nameCheck: g.nameCheck && typeof g.nameCheck === 'object'
+          ? {
+              firstNameValid: g.nameCheck.firstNameValid !== false,
+              lastNameValid: g.nameCheck.lastNameValid !== false,
+              suggestedFirstName: cleanCp1250Name(g.nameCheck.suggestedFirstName || ''),
+              suggestedLastName: cleanCp1250Name(g.nameCheck.suggestedLastName || ''),
+              reason: String(g.nameCheck.reason || '').trim()
+            }
+          : undefined
       };
     });
   }
@@ -301,9 +321,9 @@ export const CURATED_OCR_MODELS: GeminiModelInfo[] = [
     isRecommended: true
   },
   {
-    name: 'gemini-2.0-flash',
-    displayName: 'Gemini 2.0 Flash',
-    description: 'Rychlý multimodální model pro standardní dokumenty a formuláře.',
+    name: 'gemini-4-hydrogen',
+    displayName: 'Gemini 4 Hydrogen (Flash)',
+    description: 'Rychlý multimodální model nové generace pro formuláře a rukopis.',
     isRecommended: true
   },
   {
@@ -311,12 +331,6 @@ export const CURATED_OCR_MODELS: GeminiModelInfo[] = [
     displayName: 'Gemini Flash Latest',
     description: 'Dynamický alias vždy směřující na nejnovější stabilní verzi Flash.',
     isRecommended: true
-  },
-  {
-    name: 'gemini-1.5-flash',
-    displayName: 'Gemini 1.5 Flash',
-    description: 'Osvědčený lehký model s dlouhým kontextem.',
-    isRecommended: false
   },
   {
     name: 'gemini-2.5-pro',

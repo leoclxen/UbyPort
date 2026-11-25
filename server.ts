@@ -443,9 +443,8 @@ app.post('/api/import/yaml', (req, res) => {
 
 const CANDIDATE_FLASH_MODELS = [
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
+  'gemini-4-hydrogen',
   'gemini-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.5-pro'
 ];
 
@@ -520,12 +519,13 @@ Struktura formuláře:
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
      * visaNumber: Číslo víza ze sloupce 'číslo víza / Visa No'. Pokud je 'Same' nebo prázdné, zapiš ''.
      * purposeOfStay: Dvouciferný kód účelu pobytu dle číselníku Ubyport (10 = turistika / leisure, 01 = obchod, 27 = zaměstnání / práce, 11 = studium, 00 = zdravotní / léčení, 03 = návštěva rodiny/přátel, 07 = sportovní, 99 = ostatní).
+     * nameCheck: { firstNameValid: boolean, lastNameValid: boolean, suggestedFirstName?: string, suggestedLastName?: string, reason?: string } – kontrola existence reálného lidského jména a příjmení pro odhalení OCR chyby z rukopisu.
 `;
 
     const targetModel = (preferredModel || '').replace(/^models\//, '').trim();
     const isAuto = !targetModel || targetModel === 'auto';
     const modelQueue: string[] = isAuto
-      ? ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-pro']
+      ? ['gemini-2.5-flash', 'gemini-4-hydrogen', 'gemini-flash-latest', 'gemini-2.5-pro']
       : [targetModel];
 
     let lastError: any = null;

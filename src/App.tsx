@@ -41,7 +41,8 @@ import {
   Search,
   Link2,
   Eye,
-  EyeOff
+  EyeOff,
+  MapPin
 } from 'lucide-react';
 import { Property, Guest, PRAGUE_DISTRICTS } from './types';
 import {
@@ -107,6 +108,20 @@ import {
   downloadUnlFile,
   decodeUnlBuffer
 } from './lib/ubyport';
+import {
+  verifyGuestNameOcr,
+  verifyGuestAddressOsm,
+  verifyCzechPropertyAddressOsm,
+  AddressVerificationResult
+} from './lib/ocrVerification';
+import {
+  GeminiKeyCredentialForm
+} from './components/GeminiKeyCredentialForm';
+import { SheetAndNoteConfigSection } from './components/SheetAndNoteConfigSection';
+import {
+  SecretFreeConfigNote,
+  SheetAuthMode
+} from './lib/configNote';
 
 export const APP_VERSION = '2.0.0';
 
@@ -366,9 +381,27 @@ export default function App() {
   // Gemini API klíč držíme výhradně v operační paměti (RAM), nikdy v localStorage/sessionStorage
   const [userApiKey, setUserApiKey] = useState<string>('');
   const [keychainAccountName, setKeychainAccountName] = useState<string>(
-    safeStorage.getItem('ubyport_keychain_account') || 'UbyExport Gemini OCR'
+    safeStorage.getItem('ubyport_keychain_account') || 'UbyExport Google API'
+  );
+  const [fbKeychainAccountName, setFbKeychainAccountName] = useState<string>(
+    safeStorage.getItem('ubyport_fb_keychain_account') || 'UbyExport Firebase'
+  );
+  const [activeSheetMode, setActiveSheetMode] = useState<SheetAuthMode>(() => {
+    const saved = safeStorage.getItem('ubyport_sheet_auth_mode');
+    if (saved === 'pub' || saved === 'oauth' || saved === 'fb') return saved;
+    return 'pub';
+  });
+  const [firebaseSeparateKey, setFirebaseSeparateKey] = useState<boolean>(
+    safeStorage.getItem('ubyport_firebase_separate_key') === 'true'
+  );
+  const [isUnlockExtraExpanded, setIsUnlockExtraExpanded] = useState<boolean>(
+    safeStorage.getItem('ubyport_sheet_auth_mode') === 'fb' &&
+      safeStorage.getItem('ubyport_firebase_separate_key') === 'true'
   );
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
+  const settingsCredFormRef = useRef<HTMLFormElement | null>(null);
+  const closeSettingsAfterSubmitRef = useRef<boolean>(false);
+  const lastUnlockedKeyRef = useRef<string>('');
   const ocrAbortControllerRef = useRef<AbortController | null>(null);
 
   // Google Workspace & Sheets State
@@ -417,10 +450,16 @@ export default function App() {
   const [isDomainModalOpen, setIsDomainModalOpen] = useState<boolean>(false);
   const [domainModalType, setDomainModalType] = useState<'firebase' | 'gis'>('firebase');
   const [isFirebaseKeyModalOpen, setIsFirebaseKeyModalOpen] = useState<boolean>(false);
-  const [firebaseProjectIdInput, setFirebaseProjectIdInput] = useState<string>(() => getFirebaseProjectId());
+  const [firebaseProjectIdInput, setFirebaseProjectIdInput] = useState<string>(
+    () => safeStorage.getItem('ubyport_firebase_project_id') || getFirebaseProjectId()
+  );
   const [firebaseApiKeyInput, setFirebaseApiKeyInput] = useState<string>(() => getFirebaseApiKey());
-  const [authMethodChoice, setAuthMethodChoice] = useState<'firebase' | 'gis'>('firebase');
-  const [customOAuthClientId, setCustomOAuthClientIdState] = useState<string>('');
+  const [authMethodChoice, setAuthMethodChoice] = useState<'firebase' | 'gis'>(() =>
+    safeStorage.getItem('ubyport_sheet_auth_mode') === 'fb' ? 'firebase' : 'gis'
+  );
+  const [customOAuthClientId, setCustomOAuthClientIdState] = useState<string>(
+    () => safeStorage.getItem('ubyport_oauth_client_id') || ''
+  );
 
   // UNL Import Modal State
   const [isUnlImportModalOpen, setIsUnlImportModalOpen] = useState<boolean>(false);
@@ -447,6 +486,10 @@ export default function App() {
     districtKey: 'praha8',
     variableSymbol: ''
   });
+  const [scanGuestAddressChecks, setScanGuestAddressChecks] = useState<Record<number, AddressVerificationResult>>({});
+  const [scanPropAddressCheck, setScanPropAddressCheck] = useState<AddressVerificationResult | null>(null);
+  const [propAddressCheck, setPropAddressCheck] = useState<AddressVerificationResult | null>(null);
+  const [guestAddressCheck, setGuestAddressCheck] = useState<AddressVerificationResult | null>(null);
 
   // Toast State
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' | 'info' } | null>(null);
@@ -592,6 +635,18 @@ export default function App() {
       try {
         sessionStorage.removeItem(k);
       } catch {}
+    }
+
+    // Obnovit ne-tajné identifikátory pro OAuth Client ID a Firebase Project ID do paměti auth modulu
+    const savedOAuthId = safeStorage.getItem('ubyport_oauth_client_id') || '';
+    if (savedOAuthId && isValidOAuthClientId(savedOAuthId)) {
+      try {
+        setCustomOAuthClientId(savedOAuthId);
+      } catch {}
+    }
+    const savedFbProjectId = safeStorage.getItem('ubyport_firebase_project_id') || '';
+    if (savedFbProjectId) {
+      setManualFirebaseConfig(savedFbProjectId, getFirebaseApiKey());
     }
 
     fetchCloudData();
@@ -956,6 +1011,7 @@ export default function App() {
       postalCode: ''
     });
     setEditingPropId(null);
+    setPropAddressCheck(null);
     setPropModalMode('form');
     setIsPropModalOpen(true);
   };
@@ -980,6 +1036,7 @@ export default function App() {
       postalCode: prop.postalCode ?? resolved.psc
     });
     setEditingPropId(prop.id);
+    setPropAddressCheck(null);
     setPropModalMode('form');
     setIsPropModalOpen(true);
   };
@@ -997,6 +1054,37 @@ export default function App() {
       postalCode: parsed.postalCode || prev.postalCode
     }));
     showToast('Adresa byla rozdělena do polí záznamu typu A.', 'info');
+  };
+
+  const handleVerifyPropertyAddressOsm = async () => {
+    const composed = [
+      [propForm.street, [propForm.houseNumber, propForm.orientationNumber].filter(Boolean).join('/')].filter(Boolean).join(' '),
+      [propForm.postalCode, propForm.municipality || propForm.district].filter(Boolean).join(' ')
+    ]
+      .filter(Boolean)
+      .join(', ');
+    const query = propForm.address.trim() || composed;
+    if (!query) {
+      showToast('Nejprve vyplňte adresu v ČR pro ověření.', 'warning');
+      return;
+    }
+    setPropAddressCheck({ status: 'checking', message: 'Ověřuji adresu v OpenStreetMap...' });
+    const res = await verifyCzechPropertyAddressOsm(query, propForm.districtKey);
+    setPropAddressCheck(res);
+  };
+
+  const handleApplyOsmToProperty = () => {
+    if (!propAddressCheck) return;
+    const parsed = parseCzechAddress(propForm.address, propForm.districtKey);
+    setPropForm(prev => ({
+      ...prev,
+      district: propAddressCheck.normalizedDistrict || prev.district || parsed.district,
+      municipality: propAddressCheck.normalizedMunicipality || prev.municipality || parsed.municipality,
+      cityPart: propAddressCheck.normalizedCityPart || prev.cityPart || parsed.cityPart,
+      street: propAddressCheck.normalizedStreet || prev.street || parsed.street,
+      postalCode: propAddressCheck.normalizedPostalCode || prev.postalCode || parsed.postalCode
+    }));
+    showToast('Ověřené údaje z OSM byly doplněny do polí typu A.', 'success');
   };
 
   const handleSaveProperty = async (e: React.FormEvent) => {
@@ -1113,6 +1201,7 @@ export default function App() {
       nights: 1
     });
     setEditingGuest(null);
+    setGuestAddressCheck(null);
     setIsGuestModalOpen(true);
   };
 
@@ -1139,7 +1228,19 @@ export default function App() {
       nights: g.nights || 1
     });
     setEditingGuest(g);
+    setGuestAddressCheck(null);
     setIsGuestModalOpen(true);
+  };
+
+  const handleVerifyGuestAddressOsm = async () => {
+    setGuestAddressCheck({ status: 'checking', message: 'Ověřuji bydliště v OpenStreetMap...' });
+    const res = await verifyGuestAddressOsm({
+      street: guestForm.street,
+      city: guestForm.city,
+      residenceCountry: guestForm.residenceCountry,
+      nationality: guestForm.nationality
+    });
+    setGuestAddressCheck(res);
   };
 
   const handleSaveGuest = async (e: React.FormEvent) => {
@@ -1639,9 +1740,11 @@ export default function App() {
           districtKey: resultData.detectedDistrictKey || 'praha8',
           variableSymbol: resultData.detectedVS || ''
         });
+        setScanGuestAddressChecks({});
+        setScanPropAddressCheck(null);
 
         setIsScanConfirmModalOpen(true);
-        showToast(`Rozpoznáno ${resultData.guests.length} hostů! Zkontrolujte údaje.`, 'success');
+        showToast(`Rozpoznáno ${resultData.guests.length} hostů! Probíhá kontrola jmen a adres.`, 'success');
       } else {
         throw new Error('Na obrázku nebyl rozpoznán žádný vyplněný řádek hosta.');
       }
@@ -1654,6 +1757,92 @@ export default function App() {
     }
   };
 
+  // Automatické ověření adres z OCR v OpenStreetMap po otevření kontrolního okna
+  useEffect(() => {
+    if (!isScanConfirmModalOpen || !pendingScanData) return;
+
+    const controller = new AbortController();
+    const runChecks = async () => {
+      if (scanNewPropForm.address && scanNewPropForm.address.trim().length > 5 && scanNewPropForm.address.trim() !== 'Praha') {
+        setScanPropAddressCheck({ status: 'checking', message: 'Ověřuji adresu ubytování v OpenStreetMap...' });
+        const propRes = await verifyCzechPropertyAddressOsm(
+          scanNewPropForm.address,
+          scanNewPropForm.districtKey,
+          controller.signal
+        );
+        if (!controller.signal.aborted) {
+          setScanPropAddressCheck(propRes);
+        }
+      }
+
+      for (let i = 0; i < pendingScanData.guests.length; i++) {
+        if (controller.signal.aborted) break;
+        const g = pendingScanData.guests[i];
+        setScanGuestAddressChecks(prev => ({
+          ...prev,
+          [i]: { status: 'checking', message: 'Ověřuji adresu bydliště v OpenStreetMap...' }
+        }));
+        const res = await verifyGuestAddressOsm(
+          {
+            street: g.street,
+            city: g.city,
+            residenceCountry: g.residenceCountry,
+            nationality: g.nationality
+          },
+          controller.signal
+        );
+        if (!controller.signal.aborted && res.status !== 'idle') {
+          setScanGuestAddressChecks(prev => ({ ...prev, [i]: res }));
+        }
+      }
+    };
+
+    runChecks();
+    return () => controller.abort();
+  }, [isScanConfirmModalOpen]);
+
+  const updatePendingScanGuest = (idx: number, patch: Record<string, any>) => {
+    setPendingScanData(prev => {
+      if (!prev) return prev;
+      const nextGuests = prev.guests.map((item: any, i: number) => {
+        if (i !== idx) return item;
+        const nextItem: any = { ...item, ...patch };
+        if (!patch.nameCheck && item.nameCheck && (patch.firstName !== undefined || patch.lastName !== undefined)) {
+          const nextNameCheck = { ...item.nameCheck };
+          if (patch.firstName !== undefined) {
+            delete nextNameCheck.suggestedFirstName;
+            delete nextNameCheck.firstNameValid;
+            delete nextNameCheck.reason;
+          }
+          if (patch.lastName !== undefined) {
+            delete nextNameCheck.suggestedLastName;
+            delete nextNameCheck.lastNameValid;
+            delete nextNameCheck.reason;
+          }
+          nextItem.nameCheck = nextNameCheck;
+        }
+        return nextItem;
+      });
+      return { ...prev, guests: nextGuests };
+    });
+  };
+
+  const reverifyPendingGuestAddress = async (idx: number, overrideGuest?: any) => {
+    const g = overrideGuest || pendingScanData?.guests?.[idx];
+    if (!g) return;
+    setScanGuestAddressChecks(prev => ({
+      ...prev,
+      [idx]: { status: 'checking', message: 'Ověřuji adresu v OpenStreetMap...' }
+    }));
+    const res = await verifyGuestAddressOsm({
+      street: g.street,
+      city: g.city,
+      residenceCountry: g.residenceCountry,
+      nationality: g.nationality
+    });
+    setScanGuestAddressChecks(prev => ({ ...prev, [idx]: res }));
+  };
+
   const handleConfirmScanGuests = async () => {
     if (!pendingScanData) return;
 
@@ -1662,6 +1851,9 @@ export default function App() {
 
     if (scanTargetChoice === 'new') {
       const parsedAddr = parseCzechAddress(scanNewPropForm.address, scanNewPropForm.districtKey);
+      const osmAddr = scanPropAddressCheck && (scanPropAddressCheck.status === 'verified' || scanPropAddressCheck.status === 'partial')
+        ? scanPropAddressCheck
+        : null;
       const newProp: Property = {
         id: `prop_${Date.now()}`,
         name: sanitizeCp1250Field(scanNewPropForm.name || 'Nové ubytování', false),
@@ -1672,13 +1864,13 @@ export default function App() {
         districtKey: scanNewPropForm.districtKey || 'praha8',
         variableSymbol: scanNewPropForm.variableSymbol.trim(),
         contact: sanitizeCp1250Field(scanNewPropForm.hostName, false),
-        district: parsedAddr.district,
-        municipality: parsedAddr.municipality,
-        cityPart: parsedAddr.cityPart,
-        street: parsedAddr.street,
+        district: osmAddr?.normalizedDistrict || parsedAddr.district,
+        municipality: osmAddr?.normalizedMunicipality || parsedAddr.municipality,
+        cityPart: osmAddr?.normalizedCityPart || parsedAddr.cityPart,
+        street: osmAddr?.normalizedStreet || parsedAddr.street,
         houseNumber: parsedAddr.houseNumber,
         orientationNumber: parsedAddr.orientationNumber,
-        postalCode: parsedAddr.postalCode
+        postalCode: osmAddr?.normalizedPostalCode || parsedAddr.postalCode
       };
       updatedProps.push(newProp);
       targetPropId = newProp.id;
@@ -1858,6 +2050,11 @@ export default function App() {
   const handleClearApiKeyFromRam = () => {
     setUserApiKey('');
     setShowApiKey(false);
+    lastUnlockedKeyRef.current = '';
+    if (!firebaseSeparateKey) {
+      setFirebaseApiKeyInput('');
+      setManualFirebaseConfig(firebaseProjectIdInput.trim(), '');
+    }
     safeStorage.removeItem('ubyport_user_api_key');
     safeStorage.removeItem('airtax_secure_key_blob');
     safeStorage.removeItem('airtax_gemini_key');
@@ -1865,33 +2062,174 @@ export default function App() {
     showToast('API klíč byl vymazán z operační paměti (RAM).', 'info');
   };
 
+  const handleClearFirebaseKeyFromRam = () => {
+    setFirebaseApiKeyInput('');
+    setManualFirebaseConfig(firebaseProjectIdInput.trim(), '');
+    showToast('Firebase Web API klíč byl vymazán z RAM.', 'info');
+  };
+
   // UNLOCK / SAVE API KEY VIA KEYCHAIN / KEEPASS FORM (RAM-ONLY)
-  const handleUnlockKeyFromModal = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = userApiKey.trim();
-    if (!trimmed) {
-      showToast('Zadejte nebo vložte z Klíčenky / KeePassu svůj Gemini API klíč.', 'warning');
-      return;
-    }
-    setUserApiKey(trimmed);
+  const applyUnlockedGeminiKey = (
+    trimmedKey: string,
+    trimmedAccount: string,
+    closeUnlockModal: boolean
+  ) => {
+    setUserApiKey(trimmedKey);
+    setKeychainAccountName(trimmedAccount);
     setShowApiKey(false);
-    safeStorage.setItem('ubyport_keychain_account', keychainAccountName.trim() || 'UbyExport Gemini OCR');
-    refreshModelsList(trimmed);
-    setIsMissingKeyModalOpen(false);
-    showToast('Klíč odemčen pouze v RAM (na disk prohlížeče se neukládá).', 'success');
-    if (imagePreview) {
-      processImageWithOcr(imagePreview);
+    lastUnlockedKeyRef.current = trimmedKey;
+    safeStorage.setItem('ubyport_keychain_account', trimmedAccount || 'UbyExport Google API');
+    safeStorage.removeItem('ubyport_user_api_key');
+    safeStorage.removeItem('airtax_secure_key_blob');
+    safeStorage.removeItem('airtax_gemini_key');
+    safeStorage.removeItem('gemini_api_key');
+
+    // Pokud Firebase sdílí stejný Google API klíč (1 záznam), automaticky synchronizovat do Firebase RAM
+    if (!firebaseSeparateKey) {
+      setFirebaseApiKeyInput(trimmedKey);
+      if (firebaseProjectIdInput.trim()) {
+        setManualFirebaseConfig(firebaseProjectIdInput.trim(), trimmedKey);
+      }
+    }
+
+    refreshModelsList(trimmedKey);
+
+    if (closeUnlockModal) {
+      setIsMissingKeyModalOpen(false);
+      showToast('Klíč odemčen pouze v RAM (na disk prohlížeče se neukládá).', 'success');
+      if (imagePreview) {
+        processImageWithOcr(imagePreview);
+      }
+    } else {
+      showToast('Google API klíč odemčen pouze v RAM.', 'success');
     }
   };
 
-  // SAVE SETTINGS MODAL (RAM-ONLY KEY + NON-SECRET PREFS)
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmedKey = userApiKey.trim();
-    setUserApiKey(trimmedKey);
-    setShowApiKey(false);
-    safeStorage.setItem('ubyport_keychain_account', keychainAccountName.trim() || 'UbyExport Gemini OCR');
+  const applyUnlockedFirebaseKey = (trimmedKey: string, trimmedAccount: string) => {
+    const cleanAccount = trimmedAccount || 'UbyExport Firebase';
+    setFbKeychainAccountName(cleanAccount);
+    safeStorage.setItem('ubyport_fb_keychain_account', cleanAccount);
+    setFirebaseApiKeyInput(trimmedKey);
+    setFirebaseSeparateKey(true);
+    safeStorage.setItem('ubyport_firebase_separate_key', 'true');
+    setManualFirebaseConfig(firebaseProjectIdInput.trim(), trimmedKey);
+    showToast('Firebase Web API klíč odemčen pouze v RAM (2. záznam).', 'success');
+  };
+
+  const handleSheetModeChange = (mode: SheetAuthMode) => {
+    setActiveSheetMode(mode);
+    safeStorage.setItem('ubyport_sheet_auth_mode', mode);
+    if (mode === 'oauth') {
+      setAuthMethodChoice('gis');
+    } else if (mode === 'fb') {
+      setAuthMethodChoice('firebase');
+      if (firebaseSeparateKey) {
+        setIsUnlockExtraExpanded(true);
+      }
+    }
+  };
+
+  const handleSheetUrlConfigChange = (val: string) => {
+    setPublicSheetInput(val);
+    setPublicSheetUrl(val.trim());
+    if (val.trim()) {
+      safeStorage.setItem('ubyport_public_sheet_url', val.trim());
+      const parsed = parseGoogleSheetUrl(val);
+      if (parsed) {
+        setCustomSheetId(parsed.spreadsheetId);
+        safeStorage.setItem('ubyport_sheet_id', parsed.spreadsheetId);
+      }
+    } else {
+      safeStorage.removeItem('ubyport_public_sheet_url');
+    }
+  };
+
+  const handleOAuthClientIdConfigChange = (val: string) => {
+    setCustomOAuthClientIdState(val);
+    const cleaned = val.trim();
+    if (!cleaned) {
+      safeStorage.removeItem('ubyport_oauth_client_id');
+      try {
+        setCustomOAuthClientId('');
+      } catch {}
+      return;
+    }
+    if (isValidOAuthClientId(cleaned)) {
+      try {
+        setCustomOAuthClientId(cleaned);
+        safeStorage.setItem('ubyport_oauth_client_id', cleaned);
+      } catch {}
+    }
+  };
+
+  const handleFirebaseProjectIdConfigChange = (val: string) => {
+    setFirebaseProjectIdInput(val);
+    const cleanPid = val.trim();
+    if (cleanPid) {
+      safeStorage.setItem('ubyport_firebase_project_id', cleanPid);
+    } else {
+      safeStorage.removeItem('ubyport_firebase_project_id');
+    }
+    const effectiveFbKey = firebaseSeparateKey ? firebaseApiKeyInput.trim() : userApiKey.trim();
+    setManualFirebaseConfig(cleanPid, effectiveFbKey);
+  };
+
+  const handleFirebaseSeparateKeyChange = (separate: boolean) => {
+    setFirebaseSeparateKey(separate);
+    safeStorage.setItem('ubyport_firebase_separate_key', separate ? 'true' : 'false');
+    if (!separate) {
+      const shared = userApiKey.trim();
+      setFirebaseApiKeyInput(shared);
+      setManualFirebaseConfig(firebaseProjectIdInput.trim(), shared);
+    } else if (firebaseApiKeyInput.trim() && firebaseApiKeyInput.trim() === userApiKey.trim()) {
+      setFirebaseApiKeyInput('');
+      setManualFirebaseConfig(firebaseProjectIdInput.trim(), '');
+    }
+  };
+
+  const handleApplyParsedNote = (parsed: Partial<SecretFreeConfigNote>) => {
+    if (parsed.sheetMode) {
+      handleSheetModeChange(parsed.sheetMode);
+    }
+    if (typeof parsed.sheetUrl === 'string') {
+      handleSheetUrlConfigChange(parsed.sheetUrl);
+    }
+    if (typeof parsed.oauthClientId === 'string') {
+      handleOAuthClientIdConfigChange(parsed.oauthClientId);
+    }
+    if (typeof parsed.firebaseProjectId === 'string') {
+      handleFirebaseProjectIdConfigChange(parsed.firebaseProjectId);
+    }
+    if (typeof parsed.firebaseSeparateKey === 'boolean') {
+      handleFirebaseSeparateKeyChange(parsed.firebaseSeparateKey);
+    }
+    if (parsed.apiAccount) {
+      setKeychainAccountName(parsed.apiAccount);
+      safeStorage.setItem('ubyport_keychain_account', parsed.apiAccount);
+    }
+    if (parsed.fbAccount) {
+      setFbKeychainAccountName(parsed.fbAccount);
+      safeStorage.setItem('ubyport_fb_keychain_account', parsed.fbAccount);
+    }
+    if (parsed.model) {
+      setActiveModelName(parsed.model);
+      safeStorage.setItem('ubyport_model_pref', parsed.model);
+    }
+  };
+
+  // SAVE NON-SECRET SETTINGS PREFS (MODEL + GOOGLE SHEETS + IDENTIFIERS)
+  const saveNonSecretSettingsPrefs = async () => {
+    safeStorage.setItem('ubyport_keychain_account', keychainAccountName.trim() || 'UbyExport Google API');
+    safeStorage.setItem('ubyport_fb_keychain_account', fbKeychainAccountName.trim() || 'UbyExport Firebase');
+    safeStorage.setItem('ubyport_sheet_auth_mode', activeSheetMode);
+    safeStorage.setItem('ubyport_firebase_separate_key', firebaseSeparateKey ? 'true' : 'false');
     safeStorage.setItem('ubyport_model_pref', activeModelName);
+    if (customOAuthClientId.trim() && isValidOAuthClientId(customOAuthClientId)) {
+      safeStorage.setItem('ubyport_oauth_client_id', customOAuthClientId.trim());
+    }
+    if (firebaseProjectIdInput.trim()) {
+      safeStorage.setItem('ubyport_firebase_project_id', firebaseProjectIdInput.trim());
+    }
 
     // Pro jistotu odstraníme případné starší záznamy klíče z úložiště
     safeStorage.removeItem('ubyport_user_api_key');
@@ -1905,24 +2243,30 @@ export default function App() {
           guests,
           preferredModel: activeModelName
         });
-        showToast('Model uložen do Google Sheetu. API klíč zůstává bezpečně jen v RAM.', 'success');
+        showToast('Předvolby uloženy do Google Sheetu. API klíče zůstávají bezpečně jen v RAM.', 'success');
       } catch (err: any) {
         showToast(`Nastavení uloženo v prohlížeči, zápis modelu do Sheetu selhal: ${err.message}`, 'warning');
       }
     } else {
       showToast(
-        trimmedKey
+        userApiKey.trim()
           ? 'Nastavení uloženo. API klíč je aktivní pouze v operační paměti (RAM).'
           : 'Nastavení předvoleb uloženo.',
         'success'
       );
     }
 
-    if (trimmedKey) {
-      refreshModelsList(trimmedKey);
-    }
-
     setIsSettingsModalOpen(false);
+  };
+
+  const handleSaveSettingsPrefsClick = async () => {
+    const trimmedKey = userApiKey.trim();
+    if (trimmedKey && trimmedKey !== lastUnlockedKeyRef.current && settingsCredFormRef.current) {
+      closeSettingsAfterSubmitRef.current = true;
+      settingsCredFormRef.current.requestSubmit();
+      return;
+    }
+    await saveNonSecretSettingsPrefs();
   };
 
   // DATE INPUT HELPER
@@ -3324,25 +3668,69 @@ export default function App() {
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                     <label className="block text-slate-400 font-semibold">
                       Adresa v ČR (jednolinkový přehled)
                     </label>
-                    <button
-                      type="button"
-                      onClick={handleSplitPropertyAddress}
-                      className="text-[11px] text-blue-400 hover:underline font-semibold cursor-pointer"
-                    >
-                      Rozdělit do polí A ↓
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleVerifyPropertyAddressOsm}
+                        className="text-[11px] text-emerald-400 hover:underline font-semibold cursor-pointer flex items-center gap-1"
+                      >
+                        <MapPin className="w-3 h-3" />
+                        <span>Ověřit v OSM</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSplitPropertyAddress}
+                        className="text-[11px] text-blue-400 hover:underline font-semibold cursor-pointer"
+                      >
+                        Rozdělit do polí A ↓
+                      </button>
+                    </div>
                   </div>
                   <input
                     type="text"
                     value={propForm.address}
-                    onChange={e => setPropForm(prev => ({ ...prev, address: e.target.value }))}
+                    onChange={e => {
+                      setPropForm(prev => ({ ...prev, address: e.target.value }));
+                      setPropAddressCheck(null);
+                    }}
                     placeholder="např. Sokolovská 694/102, 186 00 Praha 8"
                     className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
+                  {propAddressCheck && propAddressCheck.status !== 'idle' && (
+                    <div
+                      className={`mt-2 p-2.5 rounded-xl border text-[11px] flex flex-wrap items-center justify-between gap-2 ${
+                        propAddressCheck.status === 'verified'
+                          ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-200'
+                          : propAddressCheck.status === 'checking'
+                            ? 'bg-slate-950 border-slate-800 text-slate-300'
+                            : 'bg-amber-950/40 border-amber-500/30 text-amber-200'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        {propAddressCheck.status === 'checking' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-400" />
+                        ) : propAddressCheck.status === 'verified' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                        ) : (
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                        )}
+                        <span className="leading-snug">{propAddressCheck.message}</span>
+                      </span>
+                      {(propAddressCheck.status === 'verified' || propAddressCheck.status === 'partial') && (
+                        <button
+                          type="button"
+                          onClick={handleApplyOsmToProperty}
+                          className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/40 text-emerald-200 rounded-lg font-semibold whitespace-nowrap cursor-pointer"
+                        >
+                          Použít do polí A ↓
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Strukturovaná adresa pro záznam A */}
@@ -3507,36 +3895,98 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Jméno a Příjmení */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Příjmení (1–50, bez titulů) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={50}
-                    value={guestForm.lastName}
-                    onChange={e => setGuestForm(prev => ({ ...prev, lastName: e.target.value }))}
-                    placeholder="např. MÜLLER / NOVÁK"
-                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Jméno (0–24, bez titulů)
-                  </label>
-                  <input
-                    type="text"
-                    maxLength={24}
-                    value={guestForm.firstName}
-                    onChange={e => setGuestForm(prev => ({ ...prev, firstName: e.target.value }))}
-                    placeholder="např. TOMÁŠ"
-                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
-                </div>
-              </div>
+              {/* Jméno a Příjmení + kontrola existence a OCR překlepů */}
+              {(() => {
+                const nameCheck = verifyGuestNameOcr(guestForm.firstName, guestForm.lastName);
+                return (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-slate-400 font-semibold mb-1">
+                          Příjmení (1–50, bez titulů) *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          maxLength={50}
+                          value={guestForm.lastName}
+                          onChange={e => setGuestForm(prev => ({ ...prev, lastName: e.target.value }))}
+                          placeholder="např. MÜLLER / NOVÁK"
+                          className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 font-semibold mb-1">
+                          Jméno (0–24, bez titulů)
+                        </label>
+                        <input
+                          type="text"
+                          maxLength={24}
+                          value={guestForm.firstName}
+                          onChange={e => setGuestForm(prev => ({ ...prev, firstName: e.target.value }))}
+                          placeholder="např. TOMÁŠ"
+                          className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                        />
+                      </div>
+                    </div>
+
+                    {(guestForm.lastName.trim() || guestForm.firstName.trim()) && (
+                      <div className="space-y-1.5">
+                        {nameCheck.lastName.status === 'suspect' && (
+                          <div className="p-2 rounded-xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-[11px] flex flex-wrap items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>{nameCheck.lastName.message}</span>
+                            </span>
+                            {nameCheck.lastName.suggestion && (
+                              <button
+                                type="button"
+                                onClick={() => setGuestForm(prev => ({ ...prev, lastName: nameCheck.lastName.suggestion! }))}
+                                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 rounded-lg font-bold cursor-pointer whitespace-nowrap"
+                              >
+                                Opravit na {nameCheck.lastName.suggestion}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {nameCheck.firstName.status === 'suspect' && (
+                          <div className="p-2 rounded-xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-[11px] flex flex-wrap items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>{nameCheck.firstName.message}</span>
+                            </span>
+                            {nameCheck.firstName.suggestion && (
+                              <button
+                                type="button"
+                                onClick={() => setGuestForm(prev => ({ ...prev, firstName: nameCheck.firstName.suggestion! }))}
+                                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 rounded-lg font-bold cursor-pointer whitespace-nowrap"
+                              >
+                                Opravit na {nameCheck.firstName.suggestion}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {nameCheck.lastName.status !== 'suspect' && nameCheck.firstName.status !== 'suspect' && (
+                          <p className={`text-[11px] flex items-center gap-1.5 ${
+                            !nameCheck.hasWarning ? 'text-emerald-400' : 'text-slate-400'
+                          }`}>
+                            {!nameCheck.hasWarning ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            ) : (
+                              <Info className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                            )}
+                            <span>
+                              {!nameCheck.hasWarning
+                                ? 'Jméno i příjmení ověřeno ve slovníku.'
+                                : `${nameCheck.lastName.status === 'unverified' ? nameCheck.lastName.message : nameCheck.firstName.message}`}
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Datum narození & Státní občanství */}
               <div className="grid grid-cols-2 gap-2">
@@ -3586,48 +4036,115 @@ export default function App() {
                 </div>
               )}
 
-              {/* Bydliště: Stát, Obec, Ulice */}
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Stát bydliště *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={3}
-                    value={guestForm.residenceCountry}
-                    onChange={e => setGuestForm(prev => ({ ...prev, residenceCountry: normalizeCountryCode(e.target.value) }))}
-                    placeholder="např. DEU"
-                    className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
+              {/* Bydliště: Stát, Obec, Ulice + OSM ověření */}
+              <div className="space-y-2">
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">
+                      Stát bydliště *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={3}
+                      value={guestForm.residenceCountry}
+                      onChange={e => {
+                        setGuestForm(prev => ({ ...prev, residenceCountry: normalizeCountryCode(e.target.value) }));
+                        setGuestAddressCheck(null);
+                      }}
+                      placeholder="např. DEU"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">
+                      Město / Obec *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={guestForm.city}
+                      onChange={e => {
+                        setGuestForm(prev => ({ ...prev, city: e.target.value }));
+                        setGuestAddressCheck(null);
+                      }}
+                      placeholder="např. BERLIN"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">
+                      Ulice a č.p. *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={guestForm.street}
+                      onChange={e => {
+                        setGuestForm(prev => ({ ...prev, street: e.target.value }));
+                        setGuestAddressCheck(null);
+                      }}
+                      placeholder="např. HAUPTSTRASSE 12"
+                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Město / Obec *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={guestForm.city}
-                    onChange={e => setGuestForm(prev => ({ ...prev, city: e.target.value }))}
-                    placeholder="např. BERLIN"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={handleVerifyGuestAddressOsm}
+                    disabled={guestAddressCheck?.status === 'checking'}
+                    className="min-h-[36px] px-3 py-1.5 bg-slate-800 hover:bg-slate-750 border border-slate-700 text-sky-300 rounded-xl text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer tap-active"
+                  >
+                    {guestAddressCheck?.status === 'checking' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                    ) : (
+                      <MapPin className="w-3.5 h-3.5 text-sky-400" />
+                    )}
+                    <span>Ověřit zahraniční adresu v OSM</span>
+                  </button>
+                  {guestAddressCheck && guestAddressCheck.status !== 'idle' && (
+                    <span className={`text-[11px] flex items-center gap-1 ${
+                      guestAddressCheck.status === 'verified'
+                        ? 'text-emerald-400'
+                        : guestAddressCheck.status === 'checking'
+                          ? 'text-slate-400'
+                          : 'text-amber-300'
+                    }`}>
+                      {guestAddressCheck.status === 'verified' ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      ) : guestAddressCheck.status !== 'checking' ? (
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      ) : null}
+                      <span>{guestAddressCheck.message}</span>
+                    </span>
+                  )}
                 </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Ulice a č.p. *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={guestForm.street}
-                    onChange={e => setGuestForm(prev => ({ ...prev, street: e.target.value }))}
-                    placeholder="např. HAUPTSTRASSE 12"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
-                </div>
+
+                {guestAddressCheck &&
+                  (guestAddressCheck.status === 'verified' || guestAddressCheck.status === 'partial') &&
+                  (guestAddressCheck.normalizedCity || guestAddressCheck.normalizedStreet) && (
+                    <div className="p-2 rounded-xl bg-emerald-950/35 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-emerald-200">
+                      <span>
+                        Návrh OSM: <strong>{[guestAddressCheck.normalizedStreet, guestAddressCheck.normalizedCity].filter(Boolean).join(', ')}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGuestForm(prev => ({
+                            ...prev,
+                            street: guestAddressCheck.normalizedStreet || prev.street,
+                            city: guestAddressCheck.normalizedCity || prev.city
+                          }));
+                          showToast('Adresa byla zpřesněna podle OpenStreetMap.', 'success');
+                        }}
+                        className="px-2.5 py-1 bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-500/40 text-emerald-100 rounded-lg font-semibold cursor-pointer"
+                      >
+                        Použít ověřenou adresu
+                      </button>
+                    </div>
+                  )}
               </div>
 
               {/* Doklad: Druh, Číslo, Stát vydání, Vízo */}
@@ -3926,8 +4443,76 @@ export default function App() {
                       type="text"
                       value={scanNewPropForm.name}
                       onChange={e => setScanNewPropForm(prev => ({ ...prev, name: e.target.value }))}
-                      className="w-full bg-slate-800 border border-slate-700 text-white rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1"
+                      className="w-full min-h-[40px] bg-slate-800 border border-slate-700 text-white rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1"
                     />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] text-slate-400 uppercase font-semibold">Adresa v ČR:</label>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setScanPropAddressCheck({ status: 'checking', message: 'Ověřuji adresu v OpenStreetMap...' });
+                          const r = await verifyCzechPropertyAddressOsm(scanNewPropForm.address, scanNewPropForm.districtKey);
+                          setScanPropAddressCheck(r);
+                        }}
+                        className="text-[11px] text-sky-400 hover:underline font-semibold cursor-pointer flex items-center gap-1"
+                      >
+                        <MapPin className="w-3 h-3" />
+                        <span>Ověřit v OSM</span>
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={scanNewPropForm.address}
+                      onChange={e => {
+                        setScanNewPropForm(prev => ({ ...prev, address: e.target.value }));
+                        setScanPropAddressCheck(null);
+                      }}
+                      className="w-full min-h-[40px] bg-slate-800 border border-slate-700 text-white rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1"
+                    />
+                    {scanPropAddressCheck && scanPropAddressCheck.status !== 'idle' && (
+                      <div
+                        className={`mt-1.5 text-[11px] flex flex-wrap items-center justify-between gap-2 ${
+                          scanPropAddressCheck.status === 'verified'
+                            ? 'text-emerald-400'
+                            : scanPropAddressCheck.status === 'checking'
+                              ? 'text-slate-400'
+                              : 'text-amber-300'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          {scanPropAddressCheck.status === 'checking' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          ) : scanPropAddressCheck.status === 'verified' ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          ) : (
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                          <span>{scanPropAddressCheck.message}</span>
+                        </span>
+                        {(scanPropAddressCheck.status === 'verified' || scanPropAddressCheck.status === 'partial') &&
+                          scanPropAddressCheck.normalizedMunicipality && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const parsed = parseCzechAddress(scanNewPropForm.address, scanNewPropForm.districtKey);
+                                const nums = [parsed.houseNumber, parsed.orientationNumber].filter(Boolean).join('/');
+                                const streetPart = [scanPropAddressCheck.normalizedStreet || parsed.street, nums].filter(Boolean).join(' ');
+                                const cityPart = [scanPropAddressCheck.normalizedPostalCode || parsed.postalCode, scanPropAddressCheck.normalizedMunicipality].filter(Boolean).join(' ');
+                                const nextAddr = [streetPart, cityPart].filter(Boolean).join(', ');
+                                if (nextAddr) {
+                                  setScanNewPropForm(prev => ({ ...prev, address: nextAddr }));
+                                  showToast('Adresa ubytování doplněna podle OpenStreetMap.', 'success');
+                                }
+                              }}
+                              className="px-2 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-400/40 text-emerald-100 rounded-lg font-semibold cursor-pointer whitespace-nowrap"
+                            >
+                              Použít z OSM
+                            </button>
+                          )}
+                      </div>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
@@ -3937,7 +4522,7 @@ export default function App() {
                         value={scanNewPropForm.idub}
                         onChange={e => setScanNewPropForm(prev => ({ ...prev, idub: e.target.value }))}
                         placeholder="CZ1234567890"
-                        className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1 uppercase"
+                        className="w-full min-h-[40px] bg-slate-800 border border-slate-700 text-white font-mono rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1 uppercase"
                       />
                     </div>
                     <div>
@@ -3948,7 +4533,7 @@ export default function App() {
                         value={scanNewPropForm.facilityCode}
                         onChange={e => setScanNewPropForm(prev => ({ ...prev, facilityCode: e.target.value }))}
                         placeholder="HOTEL"
-                        className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1 uppercase"
+                        className="w-full min-h-[40px] bg-slate-800 border border-slate-700 text-white font-mono rounded-lg px-2.5 py-1.5 text-xs outline-none mt-1 uppercase"
                       />
                     </div>
                   </div>
@@ -3956,25 +4541,204 @@ export default function App() {
               )}
             </div>
 
-            {/* List of scanned guests */}
+            {/* List of scanned guests with live Name Existence & OSM Address verification */}
             <div className="space-y-2">
-              <label className="block text-xs font-bold text-slate-300">Rozpoznaní hosté:</label>
-              <div className="space-y-2 max-h-56 overflow-y-auto no-scrollbar">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-xs font-bold text-slate-300">
+                  Rozpoznaní hosté a kontrola OCR:
+                </label>
+                <span className="text-[10px] text-slate-400">
+                  Jména + OpenStreetMap adresy
+                </span>
+              </div>
+              <div className="space-y-2.5 max-h-80 overflow-y-auto no-scrollbar">
                 {pendingScanData.guests.map((g: any, idx: number) => {
                   const nat = normalizeCountryCode(g.nationality);
                   const isCzech = isCzechCitizen(nat);
+                  const nameVer = verifyGuestNameOcr(g.firstName || '', g.lastName || '', g.nameCheck);
+                  const addrVer = scanGuestAddressChecks[idx];
 
                   return (
-                    <div key={idx} className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-white">
-                          {g.lastName} {g.firstName}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-blue-300">
-                          {nat}
-                        </span>
+                    <div key={idx} className="bg-slate-950 p-3 rounded-2xl border border-slate-800 text-xs space-y-2">
+                      {/* Editovatelné jméno a příjmení */}
+                      <div className="grid grid-cols-12 gap-2 items-end">
+                        <div className="col-span-5">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Příjmení</label>
+                          <input
+                            type="text"
+                            value={g.lastName || ''}
+                            onChange={e => updatePendingScanGuest(idx, { lastName: e.target.value })}
+                            className="w-full min-h-[38px] bg-slate-900 border border-slate-700 text-white font-bold rounded-lg px-2.5 py-1 text-xs uppercase outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="col-span-5">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Jméno</label>
+                          <input
+                            type="text"
+                            value={g.firstName || ''}
+                            onChange={e => updatePendingScanGuest(idx, { firstName: e.target.value })}
+                            className="w-full min-h-[38px] bg-slate-900 border border-slate-700 text-white font-bold rounded-lg px-2.5 py-1 text-xs uppercase outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="col-span-2 text-right pb-2 font-mono font-bold text-blue-300">
+                          {nat || '?'}
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-400 grid grid-cols-2 gap-1 font-mono">
+
+                      {/* Výsledek kontroly existence jména & příjmení */}
+                      {(nameVer.lastName.status !== 'verified' || nameVer.firstName.status !== 'verified') ? (
+                        <div className="p-2 rounded-xl bg-amber-950/40 border border-amber-500/35 text-amber-200 text-[11px] space-y-1.5">
+                          {nameVer.lastName.status !== 'verified' && (
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="flex items-center gap-1.5">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span>{nameVer.lastName.message}</span>
+                              </span>
+                              {nameVer.lastName.suggestion && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updatePendingScanGuest(idx, {
+                                      lastName: nameVer.lastName.suggestion,
+                                      nameCheck: {
+                                        ...(g.nameCheck || {}),
+                                        lastNameValid: true,
+                                        suggestedLastName: undefined,
+                                        reason: undefined
+                                      }
+                                    })
+                                  }
+                                  className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/40 text-amber-100 rounded-lg font-bold cursor-pointer whitespace-nowrap"
+                                >
+                                  Použít {nameVer.lastName.suggestion}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {nameVer.firstName.status !== 'verified' && (
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="flex items-center gap-1.5">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span>{nameVer.firstName.message}</span>
+                              </span>
+                              {nameVer.firstName.suggestion && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updatePendingScanGuest(idx, {
+                                      firstName: nameVer.firstName.suggestion,
+                                      nameCheck: {
+                                        ...(g.nameCheck || {}),
+                                        firstNameValid: true,
+                                        suggestedFirstName: undefined,
+                                        reason: undefined
+                                      }
+                                    })
+                                  }
+                                  className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/40 text-amber-100 rounded-lg font-bold cursor-pointer whitespace-nowrap"
+                                >
+                                  Použít {nameVer.firstName.suggestion}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>Jméno i příjmení ověřeno (existující tvar).</span>
+                        </div>
+                      )}
+
+                      {/* Editovatelné bydliště + kontrola v OpenStreetMap */}
+                      <div className="grid grid-cols-12 gap-2">
+                        <div className="col-span-5">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Ulice bydliště</label>
+                          <input
+                            type="text"
+                            value={g.street || ''}
+                            onChange={e => updatePendingScanGuest(idx, { street: e.target.value })}
+                            className="w-full min-h-[36px] bg-slate-900 border border-slate-700 text-slate-100 rounded-lg px-2 py-1 text-[11px] outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="col-span-5">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Město bydliště</label>
+                          <input
+                            type="text"
+                            value={g.city || ''}
+                            onChange={e => updatePendingScanGuest(idx, { city: e.target.value })}
+                            className="w-full min-h-[36px] bg-slate-900 border border-slate-700 text-slate-100 rounded-lg px-2 py-1 text-[11px] outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Stát</label>
+                          <input
+                            type="text"
+                            maxLength={3}
+                            value={g.residenceCountry || nat}
+                            onChange={e => updatePendingScanGuest(idx, { residenceCountry: normalizeCountryCode(e.target.value) })}
+                            className="w-full min-h-[36px] bg-slate-900 border border-slate-700 text-slate-100 font-mono rounded-lg px-2 py-1 text-[11px] uppercase outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                      </div>
+
+                      {addrVer && addrVer.status !== 'idle' && (
+                        <div
+                          className={`p-2 rounded-xl border text-[11px] space-y-1.5 ${
+                            addrVer.status === 'verified'
+                              ? 'bg-emerald-950/35 border-emerald-500/30 text-emerald-200'
+                              : addrVer.status === 'checking'
+                                ? 'bg-slate-900 border-slate-800 text-slate-400'
+                                : 'bg-amber-950/40 border-amber-500/35 text-amber-200'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              {addrVer.status === 'checking' ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-400" />
+                              ) : addrVer.status === 'verified' ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                              ) : (
+                                <MapPin className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                              )}
+                              <span className="leading-snug">{addrVer.message}</span>
+                            </span>
+                            {addrVer.status !== 'checking' && (
+                              <button
+                                type="button"
+                                onClick={() => reverifyPendingGuestAddress(idx)}
+                                className="text-sky-300 hover:underline font-semibold whitespace-nowrap cursor-pointer"
+                              >
+                                Ověřit znovu
+                              </button>
+                            )}
+                          </div>
+                          {(addrVer.status === 'verified' || addrVer.status === 'partial') &&
+                            (addrVer.normalizedStreet || addrVer.normalizedCity) &&
+                            (addrVer.normalizedStreet !== g.street || addrVer.normalizedCity !== g.city) && (
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                                <span className="text-[10px] text-emerald-300/90">
+                                  OSM návrh: {[addrVer.normalizedStreet, addrVer.normalizedCity].filter(Boolean).join(', ')}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updatePendingScanGuest(idx, {
+                                      street: addrVer.normalizedStreet || g.street,
+                                      city: addrVer.normalizedCity || g.city
+                                    });
+                                    showToast('Adresa zpřesněna podle OpenStreetMap.', 'success');
+                                  }}
+                                  className="px-2 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-400/40 text-emerald-100 rounded-lg font-semibold cursor-pointer whitespace-nowrap"
+                                >
+                                  Použít z OSM
+                                </button>
+                              </div>
+                            )}
+                        </div>
+                      )}
+
+                      <div className="text-[11px] text-slate-400 grid grid-cols-2 gap-1 font-mono pt-0.5">
                         <span>Narozen: {g.birthDate || 'neuvedeno'}</span>
                         <span>Doklad: {g.documentType || 'PAS'} {g.passportNumber || 'neuveden'}</span>
                       </div>
@@ -4115,74 +4879,90 @@ export default function App() {
               </button>
             </div>
 
-            <form onSubmit={handleSaveSettings} autoComplete="on" className="space-y-4 text-xs">
+            <div className="space-y-4 text-xs">
+              {/* ZÁZNAM 1: GOOGLE / GEMINI API KLÍČ */}
               <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3.5 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-200 font-bold flex items-center gap-1.5">
-                    <KeyRound className="w-4 h-4 text-sky-400 shrink-0" />
-                    <span>Gemini OCR API klíč (pouze RAM)</span>
-                  </span>
-                  {userApiKey.trim() ? (
-                    <button
-                      type="button"
-                      onClick={handleClearApiKeyFromRam}
-                      className="text-[11px] text-rose-400 hover:underline font-semibold cursor-pointer whitespace-nowrap"
-                    >
-                      Vymazat z RAM
-                    </button>
-                  ) : (
-                    <span className="text-[11px] text-amber-400 font-semibold whitespace-nowrap">Uzamčeno</span>
-                  )}
-                </div>
+                <GeminiKeyCredentialForm
+                  idPrefix="settings-keychain"
+                  formRef={settingsCredFormRef}
+                  accountName={keychainAccountName}
+                  onAccountNameChange={setKeychainAccountName}
+                  apiKey={userApiKey}
+                  onApiKeyChange={setUserApiKey}
+                  showApiKey={showApiKey}
+                  onToggleShowApiKey={() => setShowApiKey(prev => !prev)}
+                  onHideApiKey={() => setShowApiKey(false)}
+                  onClearFromRam={handleClearApiKeyFromRam}
+                  showStatusHeader={true}
+                  showHelpLink={true}
+                  headerTitle="Google / Gemini API klíč (1. záznam)"
+                  accountLabel="Účet v Klíčence / KeePassu (1 údaj):"
+                  accountPlaceholder="UbyExport Google API"
+                  defaultAccountFallback="UbyExport Google API"
+                  isUnlocked={Boolean(userApiKey.trim())}
+                  otherKnownAccountName={fbKeychainAccountName}
+                  onCredentialRoutedToOther={(otherAcc, secret) => {
+                    applyUnlockedFirebaseKey(secret, otherAcc);
+                    handleSheetModeChange('fb');
+                  }}
+                  submitLabel="Uložit do Klíčenky / RAM"
+                  onToast={showToast}
+                  onSubmitKey={async (trimmedKey, trimmedAccount) => {
+                    applyUnlockedGeminiKey(trimmedKey, trimmedAccount, false);
+                    if (closeSettingsAfterSubmitRef.current) {
+                      closeSettingsAfterSubmitRef.current = false;
+                      await saveNonSecretSettingsPrefs();
+                    }
+                  }}
+                />
 
-                <div>
-                  <label htmlFor="settings-keychain-user" className="block text-[11px] text-slate-400 font-semibold mb-1">
-                    Název účtu pro Klíčenku / KeePass:
-                  </label>
-                  <input
-                    id="settings-keychain-user"
-                    type="text"
-                    name="username"
-                    autoComplete="username"
-                    value={keychainAccountName}
-                    onChange={e => setKeychainAccountName(e.target.value)}
-                    placeholder="UbyExport Gemini OCR"
-                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="settings-gemini-key" className="block text-[11px] text-slate-400 font-semibold mb-1">
-                    API klíč (uložte do Face ID / macOS Klíčenky / KeePassu):
-                  </label>
-                  <div className="relative flex items-center">
-                    <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 pointer-events-none" />
-                    <input
-                      id="settings-gemini-key"
-                      type={showApiKey ? 'text' : 'password'}
-                      name="password"
-                      autoComplete="current-password"
-                      value={userApiKey}
-                      onChange={e => setUserApiKey(e.target.value)}
-                      placeholder="AIza... (vyplňte z Klíčenky / KeePassu)"
-                      className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl pl-9 pr-11 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowApiKey(prev => !prev)}
-                      className="absolute right-1 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-400 hover:text-white rounded-lg cursor-pointer"
-                      title={showApiKey ? 'Skrýt klíč' : 'Zobrazit klíč'}
-                    >
-                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Klíč se <strong className="text-slate-200">neukládá do úložiště prohlížeče ani do Google Sheetu</strong>. Po kliknutí na <em>Uložit do Klíčenky / RAM</em> vám Safari na iPhonu či Macu nabídne bezpečné uložení pod <strong>Face ID / Touch ID</strong>; na PC použijte <strong>KeePass</strong>.
+                <p className="text-[11px] text-slate-400 leading-relaxed pt-1">
+                  V poli účtu je jen 1 čistý název. Klíče se <strong className="text-slate-200">neukládají do prohlížeče ani Sheetu</strong> – ostatní nešifrovaná nastavení si zkopírujte přes Poznámku níže.
                 </p>
               </div>
 
+              {/* SJEDNOCENÉ NAPOJENÍ GOOGLE SHEETU (1 TYP) + POZNÁMKA BEZ HESEL */}
+              <SheetAndNoteConfigSection
+                idPrefix="settings-sheet"
+                sheetMode={activeSheetMode}
+                onSheetModeChange={handleSheetModeChange}
+                sheetUrlInput={publicSheetInput}
+                onSheetUrlInputChange={handleSheetUrlConfigChange}
+                oauthClientIdInput={customOAuthClientId}
+                onOAuthClientIdInputChange={handleOAuthClientIdConfigChange}
+                firebaseProjectIdInput={firebaseProjectIdInput}
+                onFirebaseProjectIdInputChange={handleFirebaseProjectIdConfigChange}
+                firebaseSeparateKey={firebaseSeparateKey}
+                onFirebaseSeparateKeyChange={handleFirebaseSeparateKeyChange}
+                apiAccountName={keychainAccountName}
+                fbAccountName={fbKeychainAccountName}
+                onFbAccountNameChange={setFbKeychainAccountName}
+                firebaseApiKeyInput={firebaseApiKeyInput}
+                onFirebaseApiKeyInputChange={setFirebaseApiKeyInput}
+                geminiApiKeyInRam={userApiKey}
+                onUnlockFirebaseKey={applyUnlockedFirebaseKey}
+                onClearFirebaseKey={handleClearFirebaseKeyFromRam}
+                onRouteToGeminiKey={(acc, secret) => {
+                  applyUnlockedGeminiKey(secret, acc, false);
+                }}
+                activeModelName={activeModelName}
+                onApplyParsedNote={handleApplyParsedNote}
+                onLoadPublicSheet={() => handleLoadFromPublicSheet()}
+                isLoadingPublicSheet={isLoadingPublicSheet}
+                onLoginOAuth={() => handleGoogleLogin('gis')}
+                onLoginFirebase={() => handleGoogleLogin('firebase')}
+                onOpenSheetsModal={() => {
+                  setIsSettingsModalOpen(false);
+                  setSheetsModalTab(activeSheetMode === 'pub' ? 'link' : 'oauth');
+                  setIsSheetsModalOpen(true);
+                }}
+                isSignedIn={Boolean(currentUser)}
+                signedInEmail={currentUser?.email}
+                connectedSheetTitle={connectedSheet?.title}
+                onToast={showToast}
+              />
+
+              {/* AKTIVNÍ MODEL OCR */}
               <div>
                 <label className="block text-slate-300 font-bold mb-1">
                   Aktivní model OCR
@@ -4195,144 +4975,40 @@ export default function App() {
                       setIsSettingsModalOpen(false);
                       openModelSelector();
                     }}
-                    className="px-2.5 py-1 bg-slate-700 hover:bg-slate-650 text-white rounded-lg text-[11px] font-semibold"
+                    className="px-2.5 py-1 bg-slate-700 hover:bg-slate-650 text-white rounded-lg text-[11px] font-semibold cursor-pointer"
                   >
                     Změnit model
                   </button>
                 </div>
               </div>
 
-              {/* Google Sheets Sync Info (Zero-Cloud Link Primary + Optional Firebase/OAuth Fallback) */}
-              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-                    Google Sheets synchronizace
-                  </span>
-                  {currentUser ? (
-                    <span className="text-[10px] text-emerald-400 font-bold">Připojeno (OAuth)</span>
-                  ) : publicSheetUrl ? (
-                    <span className="text-[10px] text-sky-400 font-bold">Propojeno (Odkaz)</span>
-                  ) : (
-                    <span className="text-[10px] text-slate-500">Nepřipojeno</span>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsSettingsModalOpen(false);
-                      setSheetsModalTab('link');
-                      setIsSheetsModalOpen(true);
-                    }}
-                    className="flex-1 min-h-[40px] py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer flex items-center justify-center gap-1.5"
-                  >
-                    <Link2 className="w-3.5 h-3.5" />
-                    <span>{publicSheetUrl ? 'Odkaz na Sheet & Export' : 'Propojit přes odkaz (bez cloudu)'}</span>
-                  </button>
-                  {publicSheetUrl && (
-                    <button
-                      type="button"
-                      onClick={() => handleLoadFromPublicSheet(publicSheetUrl)}
-                      disabled={isLoadingPublicSheet}
-                      className="min-h-[40px] py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                    >
-                      Obnovit
-                    </button>
-                  )}
-                </div>
-
-                <div className="pt-2 border-t border-slate-800/80 space-y-2">
-                  <p className="text-[10px] text-slate-400 font-semibold">Volitelná záloha (Firebase / Google Cloud OAuth2):</p>
-                  {currentUser ? (
-                    <div className="space-y-1.5 text-[11px]">
-                      <p className="text-slate-300 truncate">Účet: {currentUser.email}</p>
-                      {connectedSheet && (
-                        <a
-                          href={connectedSheet.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-blue-400 hover:underline flex items-center gap-1 font-mono truncate"
-                        >
-                          <span>{connectedSheet.title}</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                      <button
-                        type="button"
-                        onClick={handleGoogleLogout}
-                        className="text-rose-400 hover:underline text-[10px] font-semibold block pt-1 cursor-pointer"
-                      >
-                        Odhlásit Google účet
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleGoogleLogin('firebase')}
-                        className="w-full py-2 px-3 bg-emerald-800/80 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
-                      >
-                        Přihlásit přes Firebase
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleGoogleLogin('gis')}
-                        className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                      >
-                        Přímé OAuth2 (GIS)
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400">Firebase Web API klíč:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsSettingsModalOpen(false);
-                        setIsFirebaseKeyModalOpen(true);
-                      }}
-                      className="text-sky-400 hover:underline font-semibold text-[11px] cursor-pointer"
-                    >
-                      {hasFirebaseApiKey() ? 'Uložen (Změnit)' : 'Chybí (Zadat klíč)'}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400">OAuth2 Client ID & Původ:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDomainModalType('gis');
-                        setIsSettingsModalOpen(false);
-                        setIsDomainModalOpen(true);
-                      }}
-                      className="text-blue-400 hover:underline font-semibold text-[11px] cursor-pointer"
-                    >
-                      {isUsingCustomOAuthClientId() ? 'Vlastní Client ID' : 'Nastavit / Opravit'}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400">Doména pro Firebase:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDomainModalType('firebase');
-                        setIsSettingsModalOpen(false);
-                        setIsDomainModalOpen(true);
-                      }}
-                      className="text-amber-400 hover:underline font-semibold text-[11px] cursor-pointer"
-                    >
-                      Autorizované domény Firebase
-                    </button>
-                  </div>
-                </div>
+              {/* POKROČILÁ NÁPOVĚDA K DOMÉNÁM */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] px-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDomainModalType('gis');
+                    setIsSettingsModalOpen(false);
+                    setIsDomainModalOpen(true);
+                  }}
+                  className="text-blue-400 hover:underline font-semibold cursor-pointer"
+                >
+                  Nápověda k OAuth2 původu
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDomainModalType('firebase');
+                    setIsSettingsModalOpen(false);
+                    setIsDomainModalOpen(true);
+                  }}
+                  className="text-amber-400 hover:underline font-semibold cursor-pointer"
+                >
+                  Autorizované domény Firebase
+                </button>
               </div>
 
-              <div className="flex gap-2 pt-2">
+              <div className="flex gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setIsSettingsModalOpen(false)}
@@ -4341,13 +5017,14 @@ export default function App() {
                   Zavřít
                 </button>
                 <button
-                  type="submit"
-                  className="flex-1 min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active cursor-pointer whitespace-nowrap"
+                  type="button"
+                  onClick={handleSaveSettingsPrefsClick}
+                  className="flex-1 min-h-[44px] py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold tap-active cursor-pointer whitespace-nowrap"
                 >
-                  Uložit do Klíčenky / RAM
+                  Uložit předvolby
                 </button>
               </div>
-            </form>
+            </div>
           </div>
         </div>
       )}
@@ -4453,17 +5130,17 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL 8: KEYCHAIN / KEEPASS API KEY UNLOCK (RAM-ONLY) */}
+      {/* MODAL 8: KEYCHAIN / KEEPASS API KEY & CONFIG UNLOCK (RAM-ONLY) */}
       {isMissingKeyModalOpen && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-5 space-y-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-5 space-y-4 max-h-[90vh] overflow-y-auto no-scrollbar">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-3">
                 <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
                   <KeyRound className="w-5 h-5" />
                 </div>
                 <div className="text-left">
-                  <h3 className="font-bold text-white text-base">Odemknout Gemini API klíč</h3>
+                  <h3 className="font-bold text-white text-base">Odemknout klíče &amp; konfiguraci</h3>
                   <p className="text-[11px] text-slate-400">
                     Pouze v RAM · iOS Klíčenka (Face ID) / KeePass
                   </p>
@@ -4482,87 +5159,98 @@ export default function App() {
               V repozitáři nejsou uloženy žádné klíče. Odemkněte svůj klíč z <strong className="text-white">Klíčenky přes Face ID</strong> (iPhone / Mac) nebo z <strong className="text-white">KeePassu</strong> na PC. Po zavření stránky se klíč z paměti vymaže.
             </p>
 
-            <form onSubmit={handleUnlockKeyFromModal} autoComplete="on" className="space-y-3 text-left">
-              <div>
-                <label htmlFor="unlock-keychain-user" className="text-[11px] text-slate-400 font-semibold block mb-1">
-                  Účet v Klíčence / KeePassu:
-                </label>
-                <input
-                  id="unlock-keychain-user"
-                  type="text"
-                  name="username"
-                  autoComplete="username"
-                  value={keychainAccountName}
-                  onChange={e => setKeychainAccountName(e.target.value)}
-                  placeholder="UbyExport Gemini OCR"
-                  className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3.5 space-y-2.5">
+              <GeminiKeyCredentialForm
+                idPrefix="unlock-keychain"
+                accountName={keychainAccountName}
+                onAccountNameChange={setKeychainAccountName}
+                apiKey={userApiKey}
+                onApiKeyChange={setUserApiKey}
+                showApiKey={showApiKey}
+                onToggleShowApiKey={() => setShowApiKey(prev => !prev)}
+                onHideApiKey={() => setShowApiKey(false)}
+                onClearFromRam={handleClearApiKeyFromRam}
+                showStatusHeader={true}
+                showHelpLink={true}
+                headerTitle="Google / Gemini API klíč (1. záznam)"
+                accountLabel="Účet v Klíčence / KeePassu (1 údaj):"
+                accountPlaceholder="UbyExport Google API"
+                defaultAccountFallback="UbyExport Google API"
+                isUnlocked={Boolean(userApiKey.trim())}
+                otherKnownAccountName={fbKeychainAccountName}
+                onCredentialRoutedToOther={(otherAcc, secret) => {
+                  applyUnlockedFirebaseKey(secret, otherAcc);
+                  handleSheetModeChange('fb');
+                }}
+                submitLabel="Odemknout do RAM"
+                cancelLabel="Zrušit"
+                onCancel={() => setIsMissingKeyModalOpen(false)}
+                onToast={showToast}
+                onSubmitKey={(trimmedKey, trimmedAccount) => {
+                  applyUnlockedGeminiKey(trimmedKey, trimmedAccount, true);
+                }}
+              />
+            </div>
+
+            {/* Rozbalovací sekce: Napojení Google Sheetu (1 typ) + Firebase 2. záznam + Poznámka bez hesel */}
+            <div className="border-t border-slate-800 pt-3 space-y-3">
+              <button
+                type="button"
+                onClick={() => setIsUnlockExtraExpanded(prev => !prev)}
+                className="w-full min-h-[42px] px-3 py-2 bg-slate-800/70 hover:bg-slate-800 border border-slate-700/80 rounded-xl text-xs font-semibold text-slate-200 flex items-center justify-between gap-2 cursor-pointer"
+              >
+                <span className="truncate">
+                  {isUnlockExtraExpanded
+                    ? 'Skrýt nastavení Google Sheetu a poznámku'
+                    : `Google Sheet (${activeSheetMode === 'pub' ? 'Veřejný odkaz' : activeSheetMode === 'oauth' ? 'OAuth2' : 'Firebase'}) & Poznámka`}
+                </span>
+                <span className="text-[11px] text-sky-400 shrink-0">
+                  {isUnlockExtraExpanded ? 'Sbalit ▲' : 'Rozbalit ▼'}
+                </span>
+              </button>
+
+              {isUnlockExtraExpanded && (
+                <SheetAndNoteConfigSection
+                  idPrefix="unlock-sheet"
+                  sheetMode={activeSheetMode}
+                  onSheetModeChange={handleSheetModeChange}
+                  sheetUrlInput={publicSheetInput}
+                  onSheetUrlInputChange={handleSheetUrlConfigChange}
+                  oauthClientIdInput={customOAuthClientId}
+                  onOAuthClientIdInputChange={handleOAuthClientIdConfigChange}
+                  firebaseProjectIdInput={firebaseProjectIdInput}
+                  onFirebaseProjectIdInputChange={handleFirebaseProjectIdConfigChange}
+                  firebaseSeparateKey={firebaseSeparateKey}
+                  onFirebaseSeparateKeyChange={handleFirebaseSeparateKeyChange}
+                  apiAccountName={keychainAccountName}
+                  fbAccountName={fbKeychainAccountName}
+                  onFbAccountNameChange={setFbKeychainAccountName}
+                  firebaseApiKeyInput={firebaseApiKeyInput}
+                  onFirebaseApiKeyInputChange={setFirebaseApiKeyInput}
+                  geminiApiKeyInRam={userApiKey}
+                  onUnlockFirebaseKey={applyUnlockedFirebaseKey}
+                  onClearFirebaseKey={handleClearFirebaseKeyFromRam}
+                  onRouteToGeminiKey={(acc, secret) => {
+                    applyUnlockedGeminiKey(secret, acc, false);
+                  }}
+                  activeModelName={activeModelName}
+                  onApplyParsedNote={handleApplyParsedNote}
+                  onLoadPublicSheet={() => handleLoadFromPublicSheet()}
+                  isLoadingPublicSheet={isLoadingPublicSheet}
+                  onLoginOAuth={() => handleGoogleLogin('gis')}
+                  onLoginFirebase={() => handleGoogleLogin('firebase')}
+                  onOpenSheetsModal={() => {
+                    setIsMissingKeyModalOpen(false);
+                    setSheetsModalTab(activeSheetMode === 'pub' ? 'link' : 'oauth');
+                    setIsSheetsModalOpen(true);
+                  }}
+                  isSignedIn={Boolean(currentUser)}
+                  signedInEmail={currentUser?.email}
+                  connectedSheetTitle={connectedSheet?.title}
+                  onToast={showToast}
                 />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label htmlFor="unlock-gemini-key" className="text-[11px] text-slate-300 font-semibold">
-                    Google Gemini API klíč:
-                  </label>
-                  {userApiKey.trim() && (
-                    <button
-                      type="button"
-                      onClick={handleClearApiKeyFromRam}
-                      className="text-[11px] text-rose-400 hover:underline font-semibold cursor-pointer"
-                    >
-                      Vymazat z RAM
-                    </button>
-                  )}
-                </div>
-                <div className="relative flex items-center">
-                  <input
-                    id="unlock-gemini-key"
-                    type={showApiKey ? 'text' : 'password'}
-                    name="password"
-                    autoComplete="current-password"
-                    value={userApiKey}
-                    onChange={e => setUserApiKey(e.target.value)}
-                    placeholder="Klepněte a vyberte z Klíčenky / vložte..."
-                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl pl-3 pr-11 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowApiKey(prev => !prev)}
-                    className="absolute right-1 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-400 hover:text-white rounded-lg cursor-pointer"
-                    title={showApiKey ? 'Skrýt klíč' : 'Zobrazit klíč'}
-                  >
-                    {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-1.5">
-                  Bezplatný klíč získáte na{' '}
-                  <a
-                    href="https://aistudio.google.com/apikey"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-blue-400 underline font-semibold"
-                  >
-                    aistudio.google.com/apikey
-                  </a>
-                </p>
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setIsMissingKeyModalOpen(false)}
-                  className="flex-1 min-h-[44px] py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                >
-                  Zrušit
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer shadow-lg shadow-blue-600/30 whitespace-nowrap"
-                >
-                  Odemknout do RAM
-                </button>
-              </div>
-            </form>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -4840,112 +5528,90 @@ export default function App() {
               </div>
             </div>
 
-            <form
-              autoComplete="on"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!firebaseProjectIdInput.trim() || !firebaseApiKeyInput.trim()) {
-                  showToast('Zadejte prosím Firebase Project ID i Webový klíč API.', 'warning');
-                  return;
-                }
-                setManualFirebaseConfig(firebaseProjectIdInput.trim(), firebaseApiKeyInput.trim());
-                setIsFirebaseKeyModalOpen(false);
-                showToast('Firebase konfigurace uložena pouze v RAM!', 'success');
-                handleGoogleLogin('firebase');
-              }}
-              className="space-y-3"
-            >
-              <div className="space-y-1">
-                <label htmlFor="fb-project-id" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                  Firebase Project ID (účet):
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="fb-modal-project-id" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                  Firebase Project ID (ne-tajné ID projektu):
                 </label>
                 <input
-                  id="fb-project-id"
+                  id="fb-modal-project-id"
                   type="text"
-                  name="username"
-                  autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={firebaseProjectIdInput}
-                  onChange={(e) => setFirebaseProjectIdInput(e.target.value)}
+                  onChange={(e) => handleFirebaseProjectIdConfigChange(e.target.value)}
                   placeholder="např. muj-ubyport-projekt"
-                  className="w-full min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
+                  className="w-full min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-base sm:text-xs text-white font-mono placeholder:text-slate-600 outline-none"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label htmlFor="fb-api-key" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                  Firebase Web API klíč (heslo):
-                </label>
-                <input
-                  id="fb-api-key"
-                  type="password"
-                  name="password"
-                  autoComplete="current-password"
-                  value={firebaseApiKeyInput}
-                  onChange={(e) => setFirebaseApiKeyInput(e.target.value)}
-                  placeholder="AIzaSy..."
-                  className="w-full min-h-[44px] bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-slate-600 outline-none"
+              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3">
+                <GeminiKeyCredentialForm
+                  idPrefix="fb-modal-keychain"
+                  accountName={fbKeychainAccountName}
+                  onAccountNameChange={setFbKeychainAccountName}
+                  apiKey={firebaseApiKeyInput}
+                  onApiKeyChange={setFirebaseApiKeyInput}
+                  showApiKey={showApiKey}
+                  onToggleShowApiKey={() => setShowApiKey(prev => !prev)}
+                  onHideApiKey={() => setShowApiKey(false)}
+                  onClearFromRam={handleClearFirebaseKeyFromRam}
+                  showStatusHeader={true}
+                  showHelpLink={false}
+                  headerTitle="Firebase Web API klíč (2. záznam)"
+                  accountLabel="Účet Firebase v Klíčence / KeePassu (1 údaj):"
+                  accountPlaceholder="UbyExport Firebase"
+                  defaultAccountFallback="UbyExport Firebase"
+                  fieldLabel="Firebase Web API klíč (heslo / secret):"
+                  secretPlaceholder="AIzaSy..."
+                  iconAccentClass="text-amber-400"
+                  isUnlocked={Boolean(firebaseApiKeyInput.trim())}
+                  otherKnownAccountName={keychainAccountName}
+                  onCredentialRoutedToOther={(acc, secret) => {
+                    applyUnlockedGeminiKey(secret, acc, false);
+                  }}
+                  submitLabel="Použít v RAM a přihlásit Firebase"
+                  cancelLabel="Zrušit"
+                  onCancel={() => setIsFirebaseKeyModalOpen(false)}
+                  onToast={showToast}
+                  onSubmitKey={(trimmedKey, trimmedAccount) => {
+                    if (!firebaseProjectIdInput.trim()) {
+                      showToast('Zadejte prosím také Firebase Project ID.', 'warning');
+                      return;
+                    }
+                    applyUnlockedFirebaseKey(trimmedKey, trimmedAccount);
+                    setIsFirebaseKeyModalOpen(false);
+                    handleGoogleLogin('firebase');
+                  }}
                 />
               </div>
 
-              <div className="pt-1 flex flex-col gap-2">
+              <div className="flex items-center justify-end gap-1.5 pt-1">
                 <button
-                  type="submit"
-                  className="w-full min-h-[44px] py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold tap-active text-xs cursor-pointer shadow-lg shadow-blue-600/30"
+                  type="button"
+                  onClick={() => {
+                    setIsFirebaseKeyModalOpen(false);
+                    setDomainModalType('gis');
+                    setIsDomainModalOpen(true);
+                  }}
+                  className="py-2 px-2.5 text-sky-400 hover:underline text-[11px] font-semibold cursor-pointer"
                 >
-                  Použít v RAM a přihlásit se přes Firebase
+                  OAuth Client ID
                 </button>
-
-                <div className="flex items-center justify-between gap-2 pt-1">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setIsFirebaseKeyModalOpen(false)}
-                      className="min-h-[40px] py-2 px-3 text-slate-400 hover:text-white text-xs tap-active cursor-pointer"
-                    >
-                      Zrušit
-                    </button>
-                    {hasFirebaseApiKey() && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          clearManualFirebaseConfig();
-                          setFirebaseProjectIdInput('');
-                          setFirebaseApiKeyInput('');
-                          showToast('Firebase údaje vymazány z RAM.', 'info');
-                        }}
-                        className="min-h-[40px] py-2 px-2 text-rose-400 hover:underline text-[11px] font-semibold cursor-pointer"
-                      >
-                        Vymazat z RAM
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsFirebaseKeyModalOpen(false);
-                        setDomainModalType('gis');
-                        setIsDomainModalOpen(true);
-                      }}
-                      className="py-2 px-2.5 text-sky-400 hover:underline text-[11px] font-semibold cursor-pointer"
-                    >
-                      OAuth Client ID
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsFirebaseKeyModalOpen(false);
-                        setAuthMethodChoice('gis');
-                        handleGoogleLogin('gis');
-                      }}
-                      className="min-h-[40px] py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
-                    >
-                      Přímé OAuth2 (GIS)
-                    </button>
-                  </div>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFirebaseKeyModalOpen(false);
+                    setAuthMethodChoice('gis');
+                    handleGoogleLogin('gis');
+                  }}
+                  className="min-h-[40px] py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold tap-active cursor-pointer"
+                >
+                  Přímé OAuth2 (GIS)
+                </button>
               </div>
-            </form>
+            </div>
           </div>
         </div>
       )}
