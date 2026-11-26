@@ -1,4 +1,4 @@
-# UbyExport 2.7 (v2.7.0)
+# UbyExport 2.7 (v2.7.1)
 
 Webová aplikace pro evidenci ubytovaných cizinců, rychlé vytěžení ubytovacích lístků přes Gemini OCR a generování či kontrolu **UNL** souborů pro systém **UbyPort** Ředitelství služby cizinecké policie ČR.
 
@@ -6,14 +6,14 @@ Webová aplikace pro evidenci ubytovaných cizinců, rychlé vytěžení ubytova
 
 ## Pravidla verzování a historie na GitHubu
 
-- Číslo verze se upravuje **pouze na jediném místě** – v poli `"version"` v souboru `package.json` (aktuálně `2.7.0`).
+- Číslo verze se upravuje **pouze na jediném místě** – v poli `"version"` v souboru `package.json` (aktuálně `2.7.1`).
 - **Schéma `2.X.Y`**:
   - První číslo `2` zůstává pevně zachováno.
   - Druhé číslo (`X`) se zvyšuje při přidání či změně funkcionality (např. `2.6` → `2.7`).
-  - Třetí číslo (`Y`) se zvyšuje při opravách a úpravách (např. `2.6.0` → `2.6.1`).
+  - Třetí číslo (`Y`) se zvyšuje při opravách a úpravách (např. `2.7.0` → `2.7.1`).
 - **Zobrazení v UI**:
   - Na hlavní stránce (hlavička a titulek) se zobrazuje vždy **2ciferná verze** (`UbyExport 2.7`).
-  - V záložce **Nápověda / Info** se zobrazuje plná **3ciferná verze** (`UbyExport 2.7.0`).
+  - V záložce **Nápověda / Info** se zobrazuje plná **3ciferná verze** (`UbyExport 2.7.1`).
 - **Automatické Git tagy a GitHub Releases**:
   - Při synchronizaci (pushi) do hlavní větve GitHub Action automaticky zkontroluje verzi v `package.json`.
   - Pokud tag `v2.X.Y` ještě neexistuje, automaticky jej vytvoří, načte popis změn z `CHANGELOG.md` (případně z historie commitů) a publikuje **GitHub Release**.
@@ -58,7 +58,7 @@ Vývojový server běží na portu `3000` (`tsx server.ts` + Vite middleware).
 npm run build
 ```
 
-Příkaz sestaví produkční balíček do `dist/` a zrcadlí jej do `docs/` pro statický hosting na GitHub Pages (včetně automatického workflow `.github/workflows/deploy.yml`).
+Příkaz sestaví produkční balíček do `dist/` a zrcadlí jej do `docs/`. Automatické nasazení zajišťuje workflow `.github/workflows/deploy.yml` (v repozitáři na GitHubu doporučujeme v **Settings → Pages → Source** zvolit **GitHub Actions**).
 
 ---
 

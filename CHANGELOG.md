@@ -3,6 +3,12 @@
 Všechny významné změny projektu **UbyExport** jsou zaznamenávány v tomto souboru.
 Číslo verze se řídí schématem `2.X.Y` (hlavní větev `2`, funkční novinky `X`, opravy `Y`) a čte se z jediného místa v `package.json`.
 
+## [2.7.1] - 2026-11-26
+
+### Opraveno
+- Oprava GitHub Pages workflow (`deploy.yml`): oddělené `build` a `deploy` joby dle doporučení GitHubu, zakázání rušení rozběhlých nasazení (`cancel-in-progress: false`), deterministická instalace závislostí podle `bun.lock` (se záložním `npm install`) a kontrola typů před sestavením.
+- Přidána automatická detekce režimu GitHub Pages (`GitHub Actions` vs větev `/docs`), zajištění `.nojekyll` v `dist/` a přenositelná resoluce cest ve `vite.config.ts`.
+
 ## [2.7.0] - 2026-11-25
 
 ### Přidáno

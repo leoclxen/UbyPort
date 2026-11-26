@@ -12,37 +12,93 @@ permissions:
 
 concurrency:
   group: 'pages'
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      deploy_via_actions: ${{ steps.pages_check.outputs.deploy_via_actions }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Check GitHub Pages configuration
+        id: pages_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          RESPONSE=$(gh api "repos/${{ github.repository }}/pages" 2>&1)
+          STATUS=$?
+          set -e
+          if [ $STATUS -ne 0 ]; then
+            if echo "$RESPONSE" | grep -qiE "404|Not Found"; then
+              echo "::error::GitHub Pages není v tomto repozitáři zapnutý. Otevřete Settings -> Pages a nastavte Build and deployment -> Source na 'GitHub Actions'."
+              exit 1
+            fi
+            echo "Could not query Pages build_type ($RESPONSE); defaulting to GitHub Actions deployment."
+            echo "deploy_via_actions=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BUILD_TYPE=$(node -e "const d = JSON.parse(process.argv[1]); console.log(d.build_type || 'unknown')" "$RESPONSE")
+          echo "Detected GitHub Pages build_type: ${BUILD_TYPE}"
+
+          if [ "$BUILD_TYPE" = "legacy" ]; then
+            echo "deploy_via_actions=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### GitHub Pages používá nasazení z větve (/docs)"
+              echo "Repozitář má v **Settings → Pages → Source** nastaveno *Deploy from a branch* (\`build_type: legacy\`)."
+              echo "Pro přímé nasazování přes toto workflow přepněte Source na **GitHub Actions**."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "deploy_via_actions=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: |
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile || bun install || npm install --legacy-peer-deps
+          else
+            npm install --legacy-peer-deps
+          fi
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Setup GitHub Pages
+        if: steps.pages_check.outputs.deploy_via_actions == 'true'
+        uses: actions/configure-pages@v5
 
       - name: Build Vite application
         run: npm run build
 
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Ensure .nojekyll exists in dist
+        run: touch dist/.nojekyll
 
       - name: Upload artifact
+        if: steps.pages_check.outputs.deploy_via_actions == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: './dist'
 
+  deploy:
+    needs: build
+    if: needs.build.outputs.deploy_via_actions == 'true'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
