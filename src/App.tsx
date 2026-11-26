@@ -532,6 +532,22 @@ export default function App() {
     skippedIdenticalCount: number;
   } | null>(null);
 
+  // Sledování provedeného exportu hostů (UNL / CSV Hosté / Excel .xlsx) pro bezpečné mazání
+  const [exportedGuestSignatures, setExportedGuestSignatures] = useState<Record<string, string>>(() => {
+    try {
+      const raw = safeStorage.getItem('ubyport_exported_guest_sigs');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [deleteGuestsModalState, setDeleteGuestsModalState] = useState<{
+    propertyId: string;
+    propertyName: string;
+    guestCount: number;
+    hasExported: boolean;
+  } | null>(null);
+
   // Property form state
   const [propForm, setPropForm] = useState({
     name: '',
@@ -948,9 +964,33 @@ export default function App() {
     showToast('Odkaz na Google Sheet byl odpojen (lokální data zůstala zachována).', 'info');
   };
 
+  const buildPropertyGuestExportSignature = (propId: string, guestList: Guest[]) =>
+    guestList
+      .filter(g => g.propertyId === propId)
+      .map(
+        g =>
+          `${g.id}:${g.lastName}:${g.firstName}:${g.idDocumentNumber}:${g.dateArrival}:${g.dateDeparture}:${g.nationality}`
+      )
+      .sort()
+      .join('|');
+
+  const markGuestsExported = (targetPropIds: string[]) => {
+    setExportedGuestSignatures(prev => {
+      const next = { ...prev };
+      for (const pid of targetPropIds) {
+        if (!pid) continue;
+        const sig = buildPropertyGuestExportSignature(pid, guests);
+        if (sig) next[pid] = sig;
+      }
+      safeStorage.setItem('ubyport_exported_guest_sigs', JSON.stringify(next));
+      return next;
+    });
+  };
+
   const handleDownloadExcelWorkbook = async () => {
     try {
       await downloadExcelWorkbook(properties, guests);
+      markGuestsExported(Array.from(new Set(guests.map(g => g.propertyId).filter(Boolean))));
       showToast('Excel sešit (.xlsx se 3 listy) byl stažen.', 'success');
     } catch (err: any) {
       showToast(err?.message || 'Nepodařilo se vytvořit soubor .xlsx.', 'warning');
@@ -959,6 +999,9 @@ export default function App() {
 
   const handleDownloadCsv = (target: 'guests' | 'properties') => {
     downloadCsvExport(target, properties, guests);
+    if (target === 'guests') {
+      markGuestsExported(Array.from(new Set(guests.map(g => g.propertyId).filter(Boolean))));
+    }
     showToast(
       target === 'guests' ? 'CSV seznam hostů byl stažen.' : 'CSV seznam ubytování byl stažen.',
       'success'
@@ -1712,6 +1755,7 @@ export default function App() {
     const filename = `${safeCode}_${dateStr}.unl`;
 
     downloadUnlFile(result.content, filename);
+    markGuestsExported([activeProperty.id]);
     showToast(`Soubor ${filename} byl stažen v CP1250 (záznam A + ${result.includedCount}× U).`, 'success');
   };
 
@@ -1726,7 +1770,55 @@ export default function App() {
       return;
     }
     navigator.clipboard.writeText(result.content);
+    markGuestsExported([activeProperty.id]);
     showToast(`UNL zkopírován do schránky (záznam A + ${result.includedCount} řádků U).`, 'success');
+  };
+
+  const handleRequestDeleteActiveGuests = () => {
+    if (!activeProperty || activeGuests.length === 0) return;
+    const currentSig = buildPropertyGuestExportSignature(activeProperty.id, guests);
+    const hasExported =
+      Boolean(currentSig) && exportedGuestSignatures[activeProperty.id] === currentSig;
+    setDeleteGuestsModalState({
+      propertyId: activeProperty.id,
+      propertyName: activeProperty.name,
+      guestCount: activeGuests.length,
+      hasExported
+    });
+  };
+
+  const handleConfirmDeleteActiveGuests = async () => {
+    if (!deleteGuestsModalState) return;
+    const { propertyId, propertyName, guestCount } = deleteGuestsModalState;
+    const updatedGuests = guests.filter(g => g.propertyId !== propertyId);
+    setGuests(updatedGuests);
+    setExportedGuestSignatures(prev => {
+      const next = { ...prev };
+      delete next[propertyId];
+      safeStorage.setItem('ubyport_exported_guest_sigs', JSON.stringify(next));
+      return next;
+    });
+    persistLocalState(properties, updatedGuests, activePropertyId);
+    setDeleteGuestsModalState(null);
+
+    await syncServerApi('/api/import/yaml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        yamlContent: jsyaml.dump({
+          meta: {
+            version: APP_VERSION,
+            lastUpdated: new Date().toISOString(),
+            activePropertyId
+          },
+          properties,
+          guests: updatedGuests
+        })
+      })
+    });
+
+    triggerSheetSync(properties, updatedGuests);
+    showToast(`Smazáno ${guestCount} hostů v ubytování „${propertyName}“.`, 'info');
   };
 
   // Cancel scanning in progress
@@ -3482,6 +3574,19 @@ export default function App() {
                 >
                   <Copy className="w-4 h-4 text-blue-400" />
                   <span>Kopírovat UNL</span>
+                </button>
+              </div>
+
+              {/* VIZUÁLNĚ ODDĚLENÉ KOMPAKTNÍ TLAČÍTKO: SMAZAT HOSTY */}
+              <div className="pt-2.5 border-t border-slate-800/80">
+                <button
+                  type="button"
+                  onClick={handleRequestDeleteActiveGuests}
+                  disabled={!activeProperty || activeGuests.length === 0}
+                  className="w-full min-h-[44px] py-2 px-3 bg-rose-950/35 hover:bg-rose-950/70 disabled:opacity-40 disabled:cursor-not-allowed border border-rose-500/35 text-rose-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap tabular-nums"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                  <span>Smazat hosty{activeGuests.length > 0 ? ` (${activeGuests.length})` : ''}</span>
                 </button>
               </div>
 
@@ -6148,6 +6253,91 @@ export default function App() {
             }}
           />
         )}
+
+      {/* MODAL 13: DELETE ACTIVE PROPERTY GUESTS CONFIRMATION & EXPORT CHECK */}
+      {deleteGuestsModalState && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3 gap-2">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`p-2 rounded-xl border shrink-0 ${
+                    deleteGuestsModalState.hasExported
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                      : 'bg-amber-500/15 border-amber-500/40 text-amber-400'
+                  }`}
+                >
+                  {deleteGuestsModalState.hasExported ? (
+                    <Trash2 className="w-5 h-5" />
+                  ) : (
+                    <AlertTriangle className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">
+                    Smazat hosty v ubytování
+                  </h3>
+                  <p className="text-xs text-slate-400 truncate max-w-[240px]">
+                    {deleteGuestsModalState.propertyName}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteGuestsModalState(null)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 tap-active cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {!deleteGuestsModalState.hasExported ? (
+              <div className="p-3.5 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs space-y-1.5 leading-relaxed">
+                <p className="font-bold text-amber-300 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Hosté ještě nebyli exportováni!</span>
+                </p>
+                <p>
+                  Pro aktuální hosty ({deleteGuestsModalState.guestCount}) v ubytování{' '}
+                  <strong className="text-white">„{deleteGuestsModalState.propertyName}“</strong>{' '}
+                  dosud nebyl proveden export do <strong>UNL</strong>, <strong>CSV</strong> ani{' '}
+                  <strong>Excelu (.xlsx)</strong>. Smazáním o tyto záznamy trvale přijdete.
+                </p>
+              </div>
+            ) : (
+              <div className="p-3 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>Export aktuálních hostů již byl proveden.</span>
+              </div>
+            )}
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Opravdu chcete odstranit všech{' '}
+              <strong className="text-white tabular-nums">{deleteGuestsModalState.guestCount}</strong>{' '}
+              hostů přiřazených k tomuto ubytování?
+            </p>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeleteGuestsModalState(null)}
+                className="flex-1 min-h-[44px] py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-white rounded-xl text-xs font-semibold tap-active cursor-pointer"
+              >
+                {deleteGuestsModalState.hasExported ? 'Zrušit' : 'Nejprve exportovat'}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteActiveGuests}
+                className="flex-1 min-h-[44px] py-2.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer"
+              >
+                {deleteGuestsModalState.hasExported
+                  ? `Smazat (${deleteGuestsModalState.guestCount})`
+                  : `Přesto smazat (${deleteGuestsModalState.guestCount})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

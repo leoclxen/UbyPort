@@ -21,7 +21,7 @@ export function parseAppVersion(rawVersion?: string): AppVersionInfo {
 }
 
 const rawInjectedVersion =
-  typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '2.8.0';
+  typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '2.9.0';
 
 const parsedVersion = parseAppVersion(rawInjectedVersion);
 

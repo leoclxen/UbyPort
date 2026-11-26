@@ -3,6 +3,12 @@
 Všechny významné změny projektu **UbyExport** jsou zaznamenávány v tomto souboru.
 Číslo verze se řídí schématem `2.X.Y` (hlavní větev `2`, funkční novinky `X`, opravy `Y`) a čte se z jediného místa v `package.json`.
 
+## [2.9.0] - 2026-11-26
+
+### Přidáno
+- Kompaktní tlačítko **Smazat hosty** oddělené pod tlačítky pro export/kopírování UNL na záložce **Data+UNL** pro rychlé vyčištění hostů aktivního ubytování.
+- Ochranné upozornění před smazáním: pokud pro aktuální hosty dosud nebyl proveden export do UNL, CSV ani Excelu (`.xlsx`), zobrazí aplikace výrazné varování s možností vrátit se k exportu nebo smazání vědomě potvrdit.
+
 ## [2.8.0] - 2026-11-26
 
 ### Přidáno
