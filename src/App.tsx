@@ -78,8 +78,15 @@ import {
   loadFromPublicGoogleSheet,
   downloadExcelWorkbook,
   downloadCsvExport,
-  buildGoogleSheetsTsv
+  buildGoogleSheetsTsv,
+  importExcelWorkbookFile,
+  importCsvFile
 } from './lib/publicSheets';
+import {
+  ImportConflictItem,
+  planTabularImport
+} from './lib/importConflict';
+import { ImportConflictModal } from './components/ImportConflictModal';
 import {
   runClientGeminiOcr,
   GeminiModelInfo,
@@ -502,10 +509,28 @@ export default function App() {
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const unlFileInputRef = useRef<HTMLInputElement>(null);
+  const excelImportInputRef = useRef<HTMLInputElement>(null);
+  const csvGuestsImportInputRef = useRef<HTMLInputElement>(null);
+  const csvPropsImportInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const webcamVideoRef = useRef<HTMLVideoElement>(null);
   const webcamCanvasRef = useRef<HTMLCanvasElement>(null);
   const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
+
+  // Tabular Import Conflict Stepping State (.xlsx / .csv)
+  const [pendingImportSession, setPendingImportSession] = useState<{
+    sourceLabel: string;
+    newProperties: Property[];
+    newGuests: Guest[];
+    conflicts: ImportConflictItem[];
+    currentIndex: number;
+    currentChoice: 'replace' | 'keep';
+    replacedProperties: Property[];
+    replacedGuests: Guest[];
+    replacedCount: number;
+    keptCount: number;
+    skippedIdenticalCount: number;
+  } | null>(null);
 
   // Property form state
   const [propForm, setPropForm] = useState({
@@ -923,9 +948,13 @@ export default function App() {
     showToast('Odkaz na Google Sheet byl odpojen (lokální data zůstala zachována).', 'info');
   };
 
-  const handleDownloadExcelWorkbook = () => {
-    downloadExcelWorkbook(properties, guests);
-    showToast('Excel sešit (.xls se 3 listy) byl stažen.', 'success');
+  const handleDownloadExcelWorkbook = async () => {
+    try {
+      await downloadExcelWorkbook(properties, guests);
+      showToast('Excel sešit (.xlsx se 3 listy) byl stažen.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Nepodařilo se vytvořit soubor .xlsx.', 'warning');
+    }
   };
 
   const handleDownloadCsv = (target: 'guests' | 'properties') => {
@@ -934,6 +963,203 @@ export default function App() {
       target === 'guests' ? 'CSV seznam hostů byl stažen.' : 'CSV seznam ubytování byl stažen.',
       'success'
     );
+  };
+
+  const finalizeTabularImport = async (params: {
+    sourceLabel: string;
+    newProperties: Property[];
+    newGuests: Guest[];
+    replacedProperties: Property[];
+    replacedGuests: Guest[];
+    replacedCount: number;
+    keptCount: number;
+    skippedIdenticalCount: number;
+  }) => {
+    const {
+      sourceLabel,
+      newProperties,
+      newGuests,
+      replacedProperties,
+      replacedGuests,
+      replacedCount,
+      keptCount,
+      skippedIdenticalCount
+    } = params;
+
+    const replacedPropMap = new Map(replacedProperties.map(p => [p.id, p]));
+    const mergedProperties = [
+      ...properties.map(p => replacedPropMap.get(p.id) || p),
+      ...newProperties
+    ];
+
+    const replacedGuestMap = new Map(replacedGuests.map(g => [g.id, g]));
+    const mergedGuests = [
+      ...newGuests,
+      ...guests.map(g => replacedGuestMap.get(g.id) || g)
+    ];
+
+    const nextActiveId =
+      mergedProperties.find(p => p.id === activePropertyId)?.id ||
+      mergedProperties[0]?.id ||
+      '';
+
+    setProperties(mergedProperties);
+    setGuests(mergedGuests);
+    if (nextActiveId && nextActiveId !== activePropertyId) {
+      setActivePropertyId(nextActiveId);
+    }
+
+    persistLocalState(mergedProperties, mergedGuests, nextActiveId);
+    await syncServerApi('/api/import/yaml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        yamlContent: jsyaml.dump({
+          meta: {
+            version: APP_VERSION,
+            lastUpdated: new Date().toISOString(),
+            activePropertyId: nextActiveId
+          },
+          properties: mergedProperties,
+          guests: mergedGuests
+        })
+      })
+    });
+    triggerSheetSync(mergedProperties, mergedGuests);
+
+    const addedTotal = newProperties.length + newGuests.length;
+    const summaryParts: string[] = [];
+    if (addedTotal > 0) summaryParts.push(`+${addedTotal} nových`);
+    if (replacedCount > 0) summaryParts.push(`${replacedCount} nahrazeno`);
+    if (keptCount > 0) summaryParts.push(`${keptCount} ponecháno`);
+    if (skippedIdenticalCount > 0) summaryParts.push(`${skippedIdenticalCount} shodných přeskočeno`);
+
+    showToast(
+      summaryParts.length > 0
+        ? `Import ${sourceLabel}: ${summaryParts.join(', ')}.`
+        : `Import ${sourceLabel}: beze změn.`,
+      addedTotal > 0 || replacedCount > 0 ? 'success' : 'info'
+    );
+  };
+
+  const handleTabularFileSelected = async (
+    kind: 'xlsx' | 'csv_guests' | 'csv_properties',
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const sourceLabel =
+      kind === 'xlsx'
+        ? 'Excel (.xlsx)'
+        : kind === 'csv_guests'
+        ? 'CSV Hosté'
+        : 'CSV Ubytování';
+
+    try {
+      const parsed =
+        kind === 'xlsx'
+          ? await importExcelWorkbookFile(file, activeProperty?.id || '')
+          : await importCsvFile(
+              file,
+              kind === 'csv_guests' ? 'guests' : 'properties',
+              activeProperty?.id || ''
+            );
+
+      const plan = planTabularImport({
+        incomingProperties: parsed.properties,
+        incomingGuests: parsed.guests,
+        existingProperties: properties,
+        existingGuests: guests,
+        activePropertyId: activeProperty?.id || ''
+      });
+
+      const skippedTotal = plan.skippedIdenticalProperties + plan.skippedIdenticalGuests;
+
+      if (plan.conflicts.length === 0) {
+        if (plan.newProperties.length === 0 && plan.newGuests.length === 0) {
+          showToast(
+            `Import ${sourceLabel}: všech ${skippedTotal} záznamů je naprosto shodných (přeskočeno).`,
+            'info'
+          );
+          return;
+        }
+        await finalizeTabularImport({
+          sourceLabel,
+          newProperties: plan.newProperties,
+          newGuests: plan.newGuests,
+          replacedProperties: [],
+          replacedGuests: [],
+          replacedCount: 0,
+          keptCount: 0,
+          skippedIdenticalCount: skippedTotal
+        });
+        return;
+      }
+
+      setPendingImportSession({
+        sourceLabel,
+        newProperties: plan.newProperties,
+        newGuests: plan.newGuests,
+        conflicts: plan.conflicts,
+        currentIndex: 0,
+        currentChoice: 'replace',
+        replacedProperties: [],
+        replacedGuests: [],
+        replacedCount: 0,
+        keptCount: 0,
+        skippedIdenticalCount: skippedTotal
+      });
+    } catch (err: any) {
+      showToast(err?.message || `Nepodařilo se načíst soubor ${sourceLabel}.`, 'warning');
+    }
+  };
+
+  const handleConfirmImportConflictStep = async () => {
+    if (!pendingImportSession) return;
+    const conflict = pendingImportSession.conflicts[pendingImportSession.currentIndex];
+    const isReplace = pendingImportSession.currentChoice === 'replace';
+
+    const nextReplacedProperties =
+      isReplace && conflict.kind === 'property'
+        ? [...pendingImportSession.replacedProperties, conflict.incoming]
+        : pendingImportSession.replacedProperties;
+
+    const nextReplacedGuests =
+      isReplace && conflict.kind === 'guest'
+        ? [...pendingImportSession.replacedGuests, conflict.incoming]
+        : pendingImportSession.replacedGuests;
+
+    const nextReplacedCount = pendingImportSession.replacedCount + (isReplace ? 1 : 0);
+    const nextKeptCount = pendingImportSession.keptCount + (isReplace ? 0 : 1);
+    const nextIndex = pendingImportSession.currentIndex + 1;
+
+    if (nextIndex < pendingImportSession.conflicts.length) {
+      setPendingImportSession({
+        ...pendingImportSession,
+        currentIndex: nextIndex,
+        currentChoice: 'replace',
+        replacedProperties: nextReplacedProperties,
+        replacedGuests: nextReplacedGuests,
+        replacedCount: nextReplacedCount,
+        keptCount: nextKeptCount
+      });
+      return;
+    }
+
+    const finished = pendingImportSession;
+    setPendingImportSession(null);
+    await finalizeTabularImport({
+      sourceLabel: finished.sourceLabel,
+      newProperties: finished.newProperties,
+      newGuests: finished.newGuests,
+      replacedProperties: nextReplacedProperties,
+      replacedGuests: nextReplacedGuests,
+      replacedCount: nextReplacedCount,
+      keptCount: nextKeptCount,
+      skippedIdenticalCount: finished.skippedIdenticalCount
+    });
   };
 
   const handleCopySheetsTsv = async (target: 'guests' | 'properties') => {
@@ -2307,7 +2533,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#0A0E17] text-slate-100 font-sans select-none overflow-hidden">
+    <div className="flex flex-col app-shell-height bg-[#0A0E17] text-slate-100 font-sans select-none overflow-hidden">
       {/* HIDDEN FILE INPUTS */}
       <input
         ref={cameraInputRef}
@@ -2330,6 +2556,27 @@ export default function App() {
         accept=".unl,text/plain"
         className="hidden"
         onChange={handleUnlFileSelected}
+      />
+      <input
+        ref={excelImportInputRef}
+        type="file"
+        accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={e => handleTabularFileSelected('xlsx', e)}
+      />
+      <input
+        ref={csvGuestsImportInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        onChange={e => handleTabularFileSelected('csv_guests', e)}
+      />
+      <input
+        ref={csvPropsImportInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        onChange={e => handleTabularFileSelected('csv_properties', e)}
       />
 
       {/* TOAST NOTIFICATION */}
@@ -2483,7 +2730,7 @@ export default function App() {
       </header>
 
       {/* MAIN VIEW AREA */}
-      <main className="flex-1 overflow-y-auto no-scrollbar px-4 pt-3 pb-24 max-w-2xl mx-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain no-scrollbar px-4 pt-3 pb-6 max-w-2xl mx-auto w-full">
 
         {/* TAB 1: SCANNER & OCR */}
         {activeTab === 'scan' && (
@@ -2693,8 +2940,8 @@ export default function App() {
             {/* Quick overview counter */}
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3">
-                <span className="text-[10px] text-slate-400 uppercase font-semibold">Cizinci v knize</span>
-                <p className="text-xl font-black text-white mt-0.5">{activeGuests.length}</p>
+                <span className="text-[10px] text-slate-400 uppercase font-semibold">Kniha hostů</span>
+                <p className="text-xl font-black text-white mt-0.5 tabular-nums">{activeGuests.length}</p>
               </div>
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3">
                 <span className="text-[10px] text-slate-400 uppercase font-semibold">K hlášení UNL</span>
@@ -3073,44 +3320,23 @@ export default function App() {
         {activeTab === 'export' && (
           <div className="space-y-4">
             <div className="bg-gradient-to-br from-slate-900 to-slate-950 rounded-3xl border border-slate-800 p-5 space-y-4 shadow-xl">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <div>
-                  <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400">
-                    UbyPort • Příloha č. 3 (A + U)
-                  </span>
-                  <h2 className="text-base font-bold text-white">Export UNL souboru</h2>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs text-slate-400">K hlášení</span>
-                  <p className="text-xl font-black text-emerald-400">{activeUnlResult.includedCount} cizinců</p>
-                </div>
+              <div className="border-b border-slate-800 pb-3">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400">
+                  UbyPort • Příloha č. 3 (A + U)
+                </span>
+                <h2 className="text-base font-bold text-white">Export UNL souboru</h2>
               </div>
 
-              {/* VÝBĚR JEDNOHO UBYTOVÁNÍ PŘÍMO NA KARTĚ EXPORT */}
-              {properties.length > 0 ? (
-                <div className="bg-slate-950/80 rounded-2xl p-3.5 border border-slate-800 space-y-2">
-                  <label htmlFor="export-property-select" className="block text-[11px] text-slate-300 font-bold">
-                    Vyberte ubytování pro export UNL (1 soubor = 1 ubytování + jeho hosté):
-                  </label>
-                  <select
-                    id="export-property-select"
-                    value={activeProperty?.id || ''}
-                    onChange={e => handleSwitchActiveProperty(e.target.value)}
-                    className="w-full min-h-[44px] bg-slate-900 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs font-semibold focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
-                  >
-                    {properties.map(p => {
-                      const foreignCnt = guests.filter(
-                        g => g.propertyId === p.id && !isCzechCitizen(g.nationality)
-                      ).length;
-                      return (
-                        <option key={p.id} value={p.id}>
-                          {p.name} ({p.facilityCode || 'bez zkratky'} • {foreignCnt} cizinců k hlášení)
-                        </option>
-                      );
-                    })}
-                  </select>
-                  <p className="text-[11px] text-slate-400 leading-snug">
-                    Přepnutí výběru přepne aktivní ubytování v aplikaci a do souboru vyexportuje záznam <strong>A</strong> tohoto ubytování a výhradně jeho hlášené cizince <strong>U</strong>.
+              {/* Úsporný a čitelný textový přehled exportu pro aktivní ubytování z horní lišty */}
+              {activeProperty ? (
+                <div className="bg-slate-950/75 rounded-2xl px-4 py-3 border border-slate-800 flex items-center justify-between gap-2">
+                  <p className="text-sm text-slate-300 leading-snug">
+                    Export pro{' '}
+                    <strong className="text-white font-bold">„{activeProperty.name}“</strong>
+                    <span className="text-slate-500 mx-1.5">—</span>
+                    <span className="text-emerald-400 font-extrabold tabular-nums">
+                      {activeUnlResult.includedCount} cizinců
+                    </span>
                   </p>
                 </div>
               ) : (
@@ -3128,49 +3354,12 @@ export default function App() {
                 </div>
               )}
 
-              {/* Status vybraného ubytovacího zařízení (Záznam A) */}
-              {activeProperty && (() => {
-                const resolvedA = resolvePropertyTypeAFields(activeProperty);
-                const addrSummary = [
-                  [resolvedA.ulice, [resolvedA.cisloDomovni, resolvedA.cisloOrientacni].filter(Boolean).join('/')].filter(Boolean).join(' '),
-                  [resolvedA.psc, resolvedA.obec, resolvedA.okres ? `(${resolvedA.okres})` : ''].filter(Boolean).join(' ')
-                ].filter(Boolean).join(', ');
-
-                return (
-                  <div className="bg-slate-950/60 rounded-2xl p-3.5 border border-slate-800 text-xs space-y-3">
-                    <div className="flex items-center justify-between gap-2 border-b border-slate-800/60 pb-2.5">
-                      <div className="min-w-0">
-                        <span className="text-[10px] text-slate-400 uppercase font-semibold">Záznam typu A (16 polí):</span>
-                        <p className="font-bold text-white text-sm truncate">{activeProperty.name}</p>
-                        <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                          {addrSummary || activeProperty.address || 'Doplňte strukturovanou adresu pro záznam A'}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => openEditPropertyModal(activeProperty)}
-                        className="min-h-[44px] px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-blue-400 rounded-xl text-xs font-semibold tap-active whitespace-nowrap shrink-0 cursor-pointer"
-                      >
-                        Upravit záznam A
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 font-mono">
-                      <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                        <span className="text-[10px] text-slate-400 uppercase block font-sans">IDUB (12–14 znaků):</span>
-                        <p className={`text-xs font-bold tracking-wider mt-0.5 truncate ${resolvedA.idub ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {resolvedA.idub || 'CHYBÍ IDUB!'}
-                        </p>
-                      </div>
-                      <div className="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                        <span className="text-[10px] text-slate-400 uppercase block font-sans">Zkratka (5 znaků):</span>
-                        <p className={`text-xs font-bold tracking-wider mt-0.5 truncate ${resolvedA.facilityCode ? 'text-blue-400' : 'text-rose-400'}`}>
-                          {resolvedA.facilityCode || 'CHYBÍ KÓD!'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Chyby záznamu A */}
+              {/* Případné chyby / varování validace záznamu A a U */}
+              {activeProperty &&
+                (!activeUnlResult.propertyValidation.isValid ||
+                  activeUnlResult.propertyValidation.warnings.length > 0 ||
+                  activeUnlResult.guestIssues.length > 0) && (
+                  <div className="space-y-2.5">
                     {!activeUnlResult.propertyValidation.isValid && (
                       <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-[11px] space-y-1.5">
                         <div className="flex items-center justify-between gap-2 font-bold text-rose-300">
@@ -3194,15 +3383,14 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Doporučení pro záznam A */}
-                    {activeUnlResult.propertyValidation.isValid && activeUnlResult.propertyValidation.warnings.length > 0 && (
-                      <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 text-[11px] flex items-start gap-2">
-                        <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                        <span>{activeUnlResult.propertyValidation.warnings.join(' ')}</span>
-                      </div>
-                    )}
+                    {activeUnlResult.propertyValidation.isValid &&
+                      activeUnlResult.propertyValidation.warnings.length > 0 && (
+                        <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 text-[11px] flex items-start gap-2">
+                          <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                          <span>{activeUnlResult.propertyValidation.warnings.join(' ')}</span>
+                        </div>
+                      )}
 
-                    {/* Chyby hostů (záznamy U) */}
                     {activeUnlResult.guestIssues.length > 0 && (
                       <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-[11px] space-y-2">
                         <div className="flex items-center gap-1.5 font-bold text-rose-300">
@@ -3211,7 +3399,10 @@ export default function App() {
                         </div>
                         <div className="space-y-2 max-h-48 overflow-y-auto no-scrollbar">
                           {activeUnlResult.guestIssues.map(({ guest, errors }) => (
-                            <div key={guest.id} className="bg-slate-950/70 border border-rose-500/30 rounded-xl p-2.5 flex items-start justify-between gap-2">
+                            <div
+                              key={guest.id}
+                              className="bg-slate-950/70 border border-rose-500/30 rounded-xl p-2.5 flex items-start justify-between gap-2"
+                            >
                               <div className="min-w-0 space-y-0.5">
                                 <p className="font-bold text-white truncate">
                                   {guest.lastName || 'BEZ PŘÍJMENÍ'} {guest.firstName} ({guest.nationality || '?'})
@@ -3230,16 +3421,8 @@ export default function App() {
                         </div>
                       </div>
                     )}
-
-                    {activeUnlResult.excludedCzechCount > 0 && (
-                      <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 text-[11px] flex items-center justify-between">
-                        <span>Vyloučeno občanů ČR (nehlásí se):</span>
-                        <span className="font-bold text-amber-400">{activeUnlResult.excludedCzechCount}</span>
-                      </div>
-                    )}
                   </div>
-                );
-              })()}
+                )}
 
               {/* UNL FILE PREVIEW CONTAINER */}
               <div className="space-y-1.5">
@@ -3255,7 +3438,7 @@ export default function App() {
                   {activeUnlResult.content ? (
                     activeUnlResult.content
                   ) : (
-                    <span className="text-slate-600 italic">Žádná data pro export. Vyberte ubytování a přidejte hosty se zahraniční státní příslušností.</span>
+                    <span className="text-slate-600 italic">Žádná data pro export. Vyberte ubytování v horní liště a přidejte hosty se zahraniční státní příslušností.</span>
                   )}
                 </div>
               </div>
@@ -3317,69 +3500,89 @@ export default function App() {
               </div>
             </div>
 
-            {/* GOOGLE SHEETS & EXCEL EXPORT CARD (ZERO CLOUD / ZERO FIREBASE) */}
+            {/* SJEDNOCENÁ KARTA DAT: IMPORT (VLEVO) & EXPORT (VPRAVO) PRO EXCEL (.xlsx) A CSV */}
             <div className="bg-slate-900/90 rounded-3xl border border-slate-800 p-5 space-y-3.5 shadow-xl">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3 gap-2">
-                <div>
-                  <span className="text-[10px] uppercase font-bold tracking-wider text-emerald-400">
-                    Bez Google Cloud a Firebase
-                  </span>
-                  <h2 className="text-base font-bold text-white">Export pro Google Sheets & Excel</h2>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSheetsModalTab('link');
-                    setIsSheetsModalOpen(true);
-                  }}
-                  className="px-3 min-h-[40px] bg-slate-800 hover:bg-slate-750 border border-slate-700 text-sky-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 tap-active cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <Link2 className="w-3.5 h-3.5" />
-                  <span>{publicSheetUrl ? 'Spravovat odkaz' : 'Načíst z odkazu'}</span>
-                </button>
+              <div className="border-b border-slate-800 pb-3">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-emerald-400">
+                  Bez Google Cloud a Firebase
+                </span>
+                <h2 className="text-base font-bold text-white">Import a export dat (Excel &amp; CSV)</h2>
               </div>
 
               <p className="text-xs text-slate-400 leading-relaxed">
-                Stáhněte kompletní sešit pro Excel/Google Sheets nebo jedním kliknutím zkopírujte tabulku hostů pro okamžité vložení (Ctrl+V) do Google Sheets.
+                Načtěte nebo stáhněte data v Excelu (<code>.xlsx</code>) či CSV. Při importu se naprosto shodné záznamy automaticky přeskočí a u změn si zvolíte, zda nahradit nebo ponechat.
               </p>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={handleDownloadExcelWorkbook}
-                  className="min-h-[44px] py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span>Stáhnout Excel (.xls · 3 listy)</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleCopySheetsTsv('guests')}
-                  className="min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
-                >
-                  <Copy className="w-4 h-4" />
-                  <span>Kopírovat hosty pro Sheets</span>
-                </button>
+              <div className="space-y-2">
+                {/* Řádek 1: Excel (.xlsx) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => excelImportInputRef.current?.click()}
+                    className="min-h-[44px] py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap"
+                  >
+                    <FileUp className="w-4 h-4 shrink-0" />
+                    <span className="truncate">Import Excel (.xlsx)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadExcelWorkbook}
+                    className="min-h-[44px] py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                    <span className="truncate">Export Excel (.xlsx)</span>
+                  </button>
+                </div>
+
+                {/* Řádek 2: CSV Hosté */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => csvGuestsImportInputRef.current?.click()}
+                    className="min-h-[44px] py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap"
+                  >
+                    <FileUp className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span className="truncate">Import CSV Hosté</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadCsv('guests')}
+                    className="min-h-[44px] py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap tabular-nums"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="truncate">Export CSV Hosté ({guests.length})</span>
+                  </button>
+                </div>
+
+                {/* Řádek 3: CSV Ubytování */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => csvPropsImportInputRef.current?.click()}
+                    className="min-h-[44px] py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap"
+                  >
+                    <FileUp className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span className="truncate">Import CSV Ubytování</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadCsv('properties')}
+                    className="min-h-[44px] py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer whitespace-nowrap tabular-nums"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="truncate">Export CSV Ubytování ({properties.length})</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleDownloadCsv('guests')}
-                  className="min-h-[44px] py-2 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
-                >
-                  <FileDown className="w-3.5 h-3.5 text-slate-400" />
-                  <span>CSV Hosté ({guests.length})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDownloadCsv('properties')}
-                  className="min-h-[44px] py-2 px-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 tap-active cursor-pointer"
-                >
-                  <FileDown className="w-3.5 h-3.5 text-slate-400" />
-                  <span>CSV Ubytování ({properties.length})</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => handleCopySheetsTsv('guests')}
+                className="w-full min-h-[44px] py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
+              >
+                <Copy className="w-4 h-4" />
+                <span>Kopírovat hosty pro Sheets</span>
+              </button>
             </div>
           </div>
         )}
@@ -3464,26 +3667,26 @@ export default function App() {
       </main>
 
       {/* BOTTOM NAVIGATION TAB BAR */}
-      <nav className="fixed bottom-0 inset-x-0 bg-[#0D131F] border-t border-slate-800 px-2 sm:px-3 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] z-40 shadow-lg select-none">
+      <nav className="shrink-0 relative bg-[#0D131F] border-t border-slate-800 px-2 sm:px-3 pt-1.5 nav-bottom-compact z-40 shadow-lg select-none">
         <div className="max-w-2xl mx-auto grid grid-cols-5 gap-1">
           <button
             onClick={() => setActiveTab('scan')}
-            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer ${
+            className={`flex flex-col items-center justify-center min-h-[44px] py-0.5 tap-active cursor-pointer ${
               activeTab === 'scan' ? 'text-blue-500 font-bold' : 'text-slate-400'
             }`}
           >
             <Scan className="w-5 h-5" />
-            <span className="text-[10px] mt-1">Skener</span>
+            <span className="text-[10px] mt-0.5">Skener</span>
           </button>
 
           <button
             onClick={() => setActiveTab('ledger')}
-            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer relative ${
+            className={`flex flex-col items-center justify-center min-h-[44px] py-0.5 tap-active cursor-pointer relative ${
               activeTab === 'ledger' ? 'text-blue-500 font-bold' : 'text-slate-400'
             }`}
           >
             <BookOpen className="w-5 h-5" />
-            <span className="text-[10px] mt-1">Kniha</span>
+            <span className="text-[10px] mt-0.5">Kniha</span>
             {activeGuests.length > 0 && (
               <span className="absolute top-0 right-3 sm:right-5 w-4 h-4 rounded-full bg-blue-500 text-[9px] font-bold text-white flex items-center justify-center">
                 {activeGuests.length}
@@ -3493,12 +3696,12 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('properties')}
-            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer relative ${
+            className={`flex flex-col items-center justify-center min-h-[44px] py-0.5 tap-active cursor-pointer relative ${
               activeTab === 'properties' ? 'text-blue-500 font-bold' : 'text-slate-400'
             }`}
           >
             <Building className="w-5 h-5" />
-            <span className="text-[10px] mt-1">Ubytování</span>
+            <span className="text-[10px] mt-0.5">Ubytování</span>
             {properties.length > 0 && (
               <span className="absolute top-0 right-3 sm:right-5 w-4 h-4 rounded-full bg-slate-700 text-[9px] font-bold text-slate-200 flex items-center justify-center">
                 {properties.length}
@@ -3506,25 +3709,25 @@ export default function App() {
             )}
           </button>
 
-          {/* REPLACED TAB: EXPORT UNL */}
+          {/* REPLACED TAB: DATA+UNL */}
           <button
             onClick={() => setActiveTab('export')}
-            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer ${
+            className={`flex flex-col items-center justify-center min-h-[44px] py-0.5 tap-active cursor-pointer ${
               activeTab === 'export' ? 'text-blue-500 font-bold' : 'text-slate-400'
             }`}
           >
             <FileDown className="w-5 h-5" />
-            <span className="text-[10px] mt-1">Export UNL</span>
+            <span className="text-[10px] mt-0.5">Data+UNL</span>
           </button>
 
           <button
             onClick={() => setActiveTab('info')}
-            className={`flex flex-col items-center justify-center py-1 tap-active cursor-pointer ${
+            className={`flex flex-col items-center justify-center min-h-[44px] py-0.5 tap-active cursor-pointer ${
               activeTab === 'info' ? 'text-blue-500 font-bold' : 'text-slate-400'
             }`}
           >
             <HelpCircle className="w-5 h-5" />
-            <span className="text-[10px] mt-1">Nápověda</span>
+            <span className="text-[10px] mt-0.5">Nápověda</span>
           </button>
         </div>
       </nav>
@@ -5775,7 +5978,7 @@ export default function App() {
                       className="min-h-[44px] px-3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 tap-active cursor-pointer"
                     >
                       <FileSpreadsheet className="w-4 h-4" />
-                      <span>Stáhnout Excel (.xls · 3 listy)</span>
+                      <span>Stáhnout Excel (.xlsx · 3 listy)</span>
                     </button>
                     <button
                       type="button"
@@ -5926,6 +6129,25 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* MODAL 12: SEQUENTIAL IMPORT CONFLICT RESOLUTION (.xlsx / .csv) */}
+      {pendingImportSession &&
+        pendingImportSession.conflicts[pendingImportSession.currentIndex] && (
+          <ImportConflictModal
+            conflict={pendingImportSession.conflicts[pendingImportSession.currentIndex]}
+            currentIndex={pendingImportSession.currentIndex}
+            totalCount={pendingImportSession.conflicts.length}
+            selectedChoice={pendingImportSession.currentChoice}
+            onSelectChoice={choice =>
+              setPendingImportSession(prev => (prev ? { ...prev, currentChoice: choice } : null))
+            }
+            onConfirmStep={handleConfirmImportConflictStep}
+            onCancel={() => {
+              setPendingImportSession(null);
+              showToast('Import byl zrušen bez změny dat.', 'info');
+            }}
+          />
+        )}
     </div>
   );
 }

@@ -3,6 +3,23 @@
 Všechny významné změny projektu **UbyExport** jsou zaznamenávány v tomto souboru.
 Číslo verze se řídí schématem `2.X.Y` (hlavní větev `2`, funkční novinky `X`, opravy `Y`) a čte se z jediného místa v `package.json`.
 
+## [2.8.0] - 2026-11-26
+
+### Přidáno
+- Obousměrný import a export dat pro **Excel (`.xlsx`)**, **CSV Hosté** a **CSV Ubytování** s nativním generováním i čtením 3-listového `.xlsx` sešitu v prohlížeči.
+- Jednotná kontrola duplicit při importu z `.xlsx` i CSV: naprosto shodné záznamy jsou automaticky přeskočeny a pro změněné záznamy se postupně otevírá krokové okno **Nahradit stávající / Ponechat stávající** se zobrazením rozdílných polí.
+
+### Změněno
+- Přejmenování spodní záložky **Export UNL** na **Data+UNL** a popisku statistiky na Skeneru na **Kniha hostů**.
+- Zjednodušení karty exportu UNL: výběr ubytování je sjednocen výhradně do horní lišty, na kartě zůstává úsporný textový přehled `Export pro „název ubytování“ — X cizinců`, případné validační chyby a náhled UNL.
+- Sjednocení spodní sekce dat na přehledné řádky `[Import | Export]` pro každý formát a ponechání tlačítka „Načíst z odkazu“ pouze v pravém horním menu.
+
+## [2.7.2] - 2026-11-26
+
+### Opraveno
+- Oprava rozvržení pro iPhone / mobilní prohlížeče: spodní navigační lišta již nepřekrývá poslední řádky a tlačítka po odscrollování až na konec stránky (flexibilní výška `100dvh` a samostatný `shrink-0` footer místo překrývajícího `fixed` panelu).
+- Snížení přebytečného spodního odsazení navigačních tlačítek na iPhone o ~30 px při zachování bezpečné dotykové výšky `44px`.
+
 ## [2.7.1] - 2026-11-26
 
 ### Opraveno

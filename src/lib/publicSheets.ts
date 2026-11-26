@@ -6,6 +6,7 @@ import {
   normalizePurposeCode,
   parseCzechAddress
 } from './ubyport';
+import { buildXlsxBlob, parseXlsxBuffer } from './xlsx';
 
 export interface ParsedSheetUrl {
   spreadsheetId: string;
@@ -22,13 +23,21 @@ export interface PublicSheetLoadResult {
   detectedTabs: string[];
 }
 
+export interface TabularImportParseResult {
+  properties: Property[];
+  guests: Guest[];
+}
+
 const HEADERS = {
-  Ubytovani: ['ID', 'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Hostitel', 'Adresa', 'Mestska_cast'],
+  Ubytovani: [
+    'ID', 'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Hostitel', 'Adresa', 'Mestska_cast',
+    'Kontakt', 'Okres', 'Obec', 'Cast_obce', 'Ulice', 'Cislo_domovni', 'Cislo_orientacni', 'PSC'
+  ],
   Hoste: [
     'ID', 'Ubytovani_ID', 'Pokoj_jednotka', 'Airbnb_kod', 'Prijmeni', 'Jmeno', 'Datum_narozeni',
     'Statni_obcanstvi', 'Stat_bydliste', 'Obec_bydliste', 'Ulice_a_cp', 'Druh_dokladu',
     'Cislo_dokladu', 'Stat_vydani_dokladu', 'Cislo_viza', 'Ucel_pobytu', 'Prijezd', 'Odjezd',
-    'Pocet_noci', 'Vytvoreno'
+    'Pocet_noci', 'Vytvoreno', 'Poznamka'
   ],
   Prehled_hlaseni: [
     'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Celkem_cizincu_k_hlaseni', 'Celkem_noci',
@@ -60,11 +69,30 @@ export function parseGoogleSheetUrl(input: string): ParsedSheetUrl | null {
   return { spreadsheetId, gid, canonicalUrl };
 }
 
+function detectCsvDelimiter(cleanText: string): ',' | ';' {
+  const firstLineEnd = cleanText.search(/[\r\n]/);
+  const firstLine = firstLineEnd >= 0 ? cleanText.slice(0, firstLineEnd) : cleanText;
+  let inQuotes = false;
+  let commas = 0;
+  let semicolons = 0;
+  for (let i = 0; i < firstLine.length; i++) {
+    const ch = firstLine[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (!inQuotes) {
+      if (ch === ',') commas++;
+      else if (ch === ';') semicolons++;
+    }
+  }
+  return semicolons > commas ? ';' : ',';
+}
+
 /**
- * RFC-4180 CSV parser podporující uvozovky, čárky i zalomení řádků uvnitř buněk
+ * RFC-4180 CSV parser podporující uvozovky, čárky i středníky (český Excel) a zalomení řádků uvnitř buněk
  */
 export function parseCsv(text: string): string[][] {
   const clean = (text || '').replace(/^\uFEFF/, '');
+  const delimiter = detectCsvDelimiter(clean);
   const rows: string[][] = [];
   let currentRow: string[] = [];
   let currentCell = '';
@@ -86,7 +114,7 @@ export function parseCsv(text: string): string[][] {
     } else {
       if (ch === '"') {
         inQuotes = true;
-      } else if (ch === ',') {
+      } else if (ch === delimiter) {
         currentRow.push(currentCell.trim());
         currentCell = '';
       } else if (ch === '\r' && next === '\n') {
@@ -176,7 +204,7 @@ function normalizeHeaderKey(h: string): string {
     .replace(/^_+|_+$/g, '');
 }
 
-function parsePropertiesFromRows(rows: string[][]): Property[] {
+export function parsePropertiesFromRows(rows: string[][]): Property[] {
   if (rows.length < 2) return [];
   const headerKeys = rows[0].map(normalizeHeaderKey);
   const idx = (names: string[], fallbackIdx: number) => {
@@ -193,13 +221,13 @@ function parsePropertiesFromRows(rows: string[][]): Property[] {
   const iFac = idx(['zkratka_zarizeni', 'zkratka', 'facility_code', 'facilitycode'], 3);
   const iHost = idx(['hostitel', 'host', 'host_name', 'ubytovatel'], 4);
   const iAddr = idx(['adresa', 'address'], 5);
-  const iDist = idx(['mestska_cast', 'district', 'district_key'], 6);
+  const iDist = idx(['mestska_cast', 'district_key'], 6);
   const iContact = idx(['kontakt', 'contact'], -1);
-  const iOkres = idx(['okres', 'obvod'], -1);
+  const iOkres = idx(['okres', 'obvod', 'district'], -1);
   const iObec = idx(['obec', 'mesto', 'municipality'], -1);
   const iCast = idx(['cast_obce', 'city_part'], -1);
   const iUlice = idx(['ulice', 'street'], -1);
-  const iCp = idx(['cislo_domovni', 'cp', 'house_number'], -1);
+  const iCp = idx(['cislo_domovni', 'cp', 'cislo_popisne', 'house_number'], -1);
   const iCo = idx(['cislo_orientacni', 'co', 'orientation_number'], -1);
   const iPsc = idx(['psc', 'postal_code', 'zip'], -1);
 
@@ -221,20 +249,20 @@ function parsePropertiesFromRows(rows: string[][]): Property[] {
         hostName,
         address,
         districtKey,
-        contact: cell(r, iContact) || hostName,
-        district: cell(r, iOkres) || parsed.district,
-        municipality: cell(r, iObec) || parsed.municipality,
-        cityPart: cell(r, iCast) || parsed.cityPart,
-        street: cell(r, iUlice) || parsed.street,
-        houseNumber: cell(r, iCp) || parsed.houseNumber,
-        orientationNumber: cell(r, iCo) || parsed.orientationNumber,
-        postalCode: cell(r, iPsc) || parsed.postalCode
+        contact: iContact >= 0 ? cell(r, iContact) : hostName,
+        district: iOkres >= 0 ? cell(r, iOkres) : parsed.district,
+        municipality: iObec >= 0 ? cell(r, iObec) : parsed.municipality,
+        cityPart: iCast >= 0 ? cell(r, iCast) : parsed.cityPart,
+        street: iUlice >= 0 ? cell(r, iUlice) : parsed.street,
+        houseNumber: iCp >= 0 ? cell(r, iCp) : parsed.houseNumber,
+        orientationNumber: iCo >= 0 ? cell(r, iCo) : parsed.orientationNumber,
+        postalCode: iPsc >= 0 ? cell(r, iPsc) : parsed.postalCode
       };
     })
     .filter(p => p.name.length > 0);
 }
 
-function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): Guest[] {
+export function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): Guest[] {
   if (rows.length < 2) return [];
   const headerKeys = rows[0].map(normalizeHeaderKey);
 
@@ -322,7 +350,7 @@ function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): Guest[]
     .filter((g): g is Guest => g !== null);
 }
 
-function classifyRows(rows: string[][]): 'ubytovani' | 'hoste' | 'nastaveni' | 'unknown' {
+export function classifyRows(rows: string[][]): 'ubytovani' | 'hoste' | 'nastaveni' | 'unknown' {
   if (!rows || rows.length === 0) return 'unknown';
   const h = rows[0].map(normalizeHeaderKey);
   if (h.includes('nazev_ubytovani') || (h.includes('idub') && h.includes('zkratka_zarizeni'))) {
@@ -393,7 +421,6 @@ export async function loadFromPublicGoogleSheet(
     }
   }
 
-  // Pokud má sešit hosty, ale neměl list Ubytovani, přiřadíme výchozí propertyId
   const resolvedFallbackPropId = properties[0]?.id || fallbackPropertyId;
   if (resolvedFallbackPropId) {
     guests = guests.map(g => ({
@@ -420,15 +447,6 @@ function escapeCsvCell(val: unknown): string {
   return s;
 }
 
-function escapeXml(val: unknown): string {
-  return String(val ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
 function buildGuestTableRows(guests: Guest[]): (string | number)[][] {
   return guests.map(g => [
     g.id,
@@ -450,7 +468,8 @@ function buildGuestTableRows(guests: Guest[]): (string | number)[][] {
     g.dateArrival || '',
     g.dateDeparture || '',
     g.nights || 1,
-    g.createdAt || new Date().toISOString()
+    g.createdAt || new Date().toISOString(),
+    g.note || ''
   ]);
 }
 
@@ -462,7 +481,15 @@ function buildPropertyTableRows(properties: Property[]): (string | number)[][] {
     p.facilityCode || '',
     p.hostName || '',
     p.address || '',
-    p.districtKey || 'praha8'
+    p.districtKey || 'praha8',
+    p.contact || '',
+    p.district || '',
+    p.municipality || '',
+    p.cityPart || '',
+    p.street || '',
+    p.houseNumber || '',
+    p.orientationNumber || '',
+    p.postalCode || ''
   ]);
 }
 
@@ -496,55 +523,100 @@ function triggerFileDownload(blob: Blob, filename: string) {
 }
 
 /**
- * Stáhne více-listový Excel sešit (.xls XML Spreadsheet 2003) kompatibilní s Excelem i Google Sheets (Soubor -> Importovat)
+ * Stáhne nativní více-listový Excel sešit (.xlsx) se 3 listy (Hoste, Ubytovani, Prehled_hlaseni)
  */
-export function downloadExcelWorkbook(properties: Property[], guests: Guest[]): void {
-  const sheets: { name: string; headers: string[]; rows: (string | number)[][] }[] = [
+export async function downloadExcelWorkbook(properties: Property[], guests: Guest[]): Promise<void> {
+  const blob = await buildXlsxBlob([
     { name: 'Hoste', headers: HEADERS.Hoste, rows: buildGuestTableRows(guests) },
     { name: 'Ubytovani', headers: HEADERS.Ubytovani, rows: buildPropertyTableRows(properties) },
     { name: 'Prehled_hlaseni', headers: HEADERS.Prehled_hlaseni, rows: buildOverviewTableRows(properties, guests) }
-  ];
-
-  const renderWorksheet = (sheet: { name: string; headers: string[]; rows: (string | number)[][] }) => {
-    const headerCells = sheet.headers
-      .map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`)
-      .join('');
-    const bodyRows = sheet.rows
-      .map(row => {
-        const cells = row
-          .map(val => {
-            const isNum = typeof val === 'number' && !isNaN(val);
-            return `<Cell><Data ss:Type="${isNum ? 'Number' : 'String'}">${escapeXml(val)}</Data></Cell>`;
-          })
-          .join('');
-        return `<Row>${cells}</Row>`;
-      })
-      .join('\n');
-
-    return `  <Worksheet ss:Name="${escapeXml(sheet.name)}">
-    <Table>
-      <Row>${headerCells}</Row>
-${bodyRows}
-    </Table>
-  </Worksheet>`;
-  };
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-  <Styles>
-    <Style ss:ID="header">
-      <Font ss:Bold="1" ss:Color="#FFFFFF"/>
-      <Interior ss:Color="#1E293B" ss:Pattern="Solid"/>
-    </Style>
-  </Styles>
-${sheets.map(renderWorksheet).join('\n')}
-</Workbook>`;
-
+  ]);
   const dateStr = new Date().toISOString().split('T')[0];
-  const blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8' });
-  triggerFileDownload(blob, `ubyport-evidence-${dateStr}.xls`);
+  triggerFileDownload(blob, `ubyport-evidence-${dateStr}.xlsx`);
+}
+
+/**
+ * Načte data z vybraného Excel souboru (.xlsx)
+ */
+export async function importExcelWorkbookFile(
+  file: File,
+  fallbackPropertyId = ''
+): Promise<TabularImportParseResult> {
+  const buffer = await file.arrayBuffer();
+  const sheets = await parseXlsxBuffer(buffer);
+  if (sheets.length === 0) {
+    throw new Error('Soubor Excel (.xlsx) neobsahuje žádné čitelné listy.');
+  }
+
+  let properties: Property[] = [];
+  let guests: Guest[] = [];
+
+  for (const sheet of sheets) {
+    const kind = classifyRows(sheet.rows);
+    const normName = sheet.name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+
+    if (kind === 'ubytovani' || (kind === 'unknown' && normName.includes('ubyt'))) {
+      properties = [...properties, ...parsePropertiesFromRows(sheet.rows)];
+    } else if (kind === 'hoste' || (kind === 'unknown' && normName.includes('host'))) {
+      guests = [...guests, ...parseGuestsFromRows(sheet.rows, fallbackPropertyId)];
+    }
+  }
+
+  if (properties.length === 0 && guests.length === 0) {
+    throw new Error('V souboru .xlsx nebyly nalezeny žádné platné záznamy hostů ani ubytování.');
+  }
+
+  return { properties, guests };
+}
+
+async function decodeCsvFileText(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const utf8 = new TextDecoder('utf-8').decode(buf);
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try {
+    return new TextDecoder('windows-1250').decode(buf);
+  } catch {
+    return utf8;
+  }
+}
+
+/**
+ * Načte a ověří lokální CSV soubor pro Hosty nebo Ubytování
+ */
+export async function importCsvFile(
+  file: File,
+  expectedTarget: 'guests' | 'properties',
+  fallbackPropertyId = ''
+): Promise<TabularImportParseResult> {
+  const text = await decodeCsvFileText(file);
+  const rows = parseCsv(text);
+  if (rows.length < 2) {
+    throw new Error('Vybraný CSV soubor je prázdný nebo neobsahuje datové řádky.');
+  }
+
+  const kind = classifyRows(rows);
+  if (expectedTarget === 'guests') {
+    if (kind === 'ubytovani') {
+      throw new Error('Vybraný CSV soubor obsahuje seznam ubytování, nikoliv hosty. Použijte řádek „CSV Ubytování“.');
+    }
+    const parsedGuests = parseGuestsFromRows(rows, fallbackPropertyId);
+    if (parsedGuests.length === 0) {
+      throw new Error('V CSV souboru nebyl nalezen žádný platný záznam hosta.');
+    }
+    return { properties: [], guests: parsedGuests };
+  }
+
+  if (kind === 'hoste') {
+    throw new Error('Vybraný CSV soubor obsahuje seznam hostů, nikoliv ubytování. Použijte řádek „CSV Hosté“.');
+  }
+  const parsedProperties = parsePropertiesFromRows(rows);
+  if (parsedProperties.length === 0) {
+    throw new Error('V CSV souboru nebylo nalezeno žádný platný záznam ubytování.');
+  }
+  return { properties: parsedProperties, guests: [] };
 }
 
 /**

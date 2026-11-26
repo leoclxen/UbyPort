@@ -43,6 +43,18 @@
   }
 }
 
+/* Full dynamic viewport height for mobile Safari / iOS standalone PWA */
+.app-shell-height {
+  height: 100%;
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Compact bottom nav safe-area padding (~30px lower on Face ID iPhones while keeping edge clearance) */
+.nav-bottom-compact {
+  padding-bottom: max(6px, calc(env(safe-area-inset-bottom, 0px) - 22px));
+}
+
 /* Custom scrollbars that hide scrollbar yet keep scrolling smooth */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
