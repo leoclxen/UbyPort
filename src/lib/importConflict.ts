@@ -248,8 +248,6 @@ export function computeGuestDiffs(
       label: 'Ubytovací zařízení',
       display: v => getPropLabel(normStr(v))
     },
-    { key: 'unit', label: 'Pokoj / jednotka' },
-    { key: 'airbnbCode', label: 'Kód rezervace', norm: normUpper },
     { key: 'lastName', label: 'Příjmení' },
     { key: 'firstName', label: 'Jméno' },
     { key: 'birthDate', label: 'Datum narození', norm: normDateVal },
@@ -257,18 +255,11 @@ export function computeGuestDiffs(
     { key: 'residenceCountry', label: 'Stát bydliště', norm: normNat },
     { key: 'city', label: 'Obec bydliště' },
     { key: 'street', label: 'Ulice a č.p.' },
-    { key: 'idDocumentType', label: 'Druh dokladu', norm: normUpper },
     { key: 'idDocumentNumber', label: 'Číslo dokladu', norm: normUpper },
-    { key: 'documentIssuerCountry', label: 'Stát vydání dokladu', norm: normNat },
     { key: 'visaNumber', label: 'Číslo víza' },
     { key: 'purposeOfStay', label: 'Účel pobytu', norm: normPurp },
     { key: 'dateArrival', label: 'Příjezd', norm: normDateVal },
     { key: 'dateDeparture', label: 'Odjezd', norm: normDateVal },
-    {
-      key: 'nights',
-      label: 'Počet nocí',
-      norm: v => String(Math.max(1, Number(v) || 1))
-    },
     { key: 'note', label: 'Poznámka' }
   ];
 
@@ -381,9 +372,6 @@ export function planTabularImport(params: {
       propertyId: resolvedPropId,
       residenceCountry: normalizeCountryCode(
         rawGuest.residenceCountry || rawGuest.nationality || 'DEU'
-      ),
-      documentIssuerCountry: normalizeCountryCode(
-        rawGuest.documentIssuerCountry || rawGuest.nationality || 'DEU'
       ),
       nationality: normalizeCountryCode(rawGuest.nationality || 'DEU'),
       purposeOfStay: normalizePurposeCode(rawGuest.purposeOfStay || '10')

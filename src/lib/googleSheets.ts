@@ -1,5 +1,11 @@
 import { Property, Guest } from '../types';
-import { normalizeCountryCode, isCzechCitizen, normalizePurposeCode, parseCzechAddress } from './ubyport';
+import {
+  normalizeCountryCode,
+  isCzechCitizen,
+  normalizePurposeCode,
+  parseCzechAddress,
+  calculateStayNights
+} from './ubyport';
 
 export interface SpreadsheetInfo {
   id: string;
@@ -20,10 +26,10 @@ const DEFAULT_TITLE = 'UbyExport - Evidence cizinců';
 const HEADERS = {
   Ubytovani: ['ID', 'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Hostitel', 'Adresa', 'Mestska_cast'],
   Hoste: [
-    'ID', 'Ubytovani_ID', 'Pokoj_jednotka', 'Airbnb_kod', 'Prijmeni', 'Jmeno', 'Datum_narozeni',
-    'Statni_obcanstvi', 'Stat_bydliste', 'Obec_bydliste', 'Ulice_a_cp', 'Druh_dokladu',
-    'Cislo_dokladu', 'Stat_vydani_dokladu', 'Cislo_viza', 'Ucel_pobytu', 'Prijezd', 'Odjezd',
-    'Pocet_noci', 'Vytvoreno'
+    'ID', 'Ubytovani_ID', 'Prijmeni', 'Jmeno', 'Datum_narozeni',
+    'Statni_obcanstvi', 'Stat_bydliste', 'Obec_bydliste', 'Ulice_a_cp',
+    'Cislo_dokladu', 'Cislo_viza', 'Ucel_pobytu', 'Prijezd', 'Odjezd',
+    'Vytvoreno', 'Poznamka'
   ],
   Prehled_hlaseni: [
     'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Celkem_cizincu_k_hlaseni', 'Celkem_noci',
@@ -187,7 +193,7 @@ async function ensureRequiredSheetsExist(accessToken: string, spreadsheetId: str
 async function initializeHeadersAndInitialData(accessToken: string, spreadsheetId: string) {
   const data = [
     { range: 'Ubytovani!A1:G1', values: [HEADERS.Ubytovani] },
-    { range: 'Hoste!A1:T1', values: [HEADERS.Hoste] },
+    { range: 'Hoste!A1:P1', values: [HEADERS.Hoste] },
     { range: 'Prehled_hlaseni!A1:G1', values: [HEADERS.Prehled_hlaseni] },
     {
       range: 'Nastaveni!A1:C3',
@@ -250,7 +256,7 @@ export async function loadAllDataFromGoogleSheet(
 
   const ranges = [
     'Ubytovani!A2:G1000',
-    'Hoste!A2:T5000',
+    'Hoste!A2:P5000',
     'Nastaveni!A1:C10'
   ];
   const query = ranges.map(r => `ranges=${encodeURIComponent(r)}`).join('&');
@@ -306,40 +312,33 @@ export async function loadAllDataFromGoogleSheet(
     };
   }).filter((p: Property) => p.name.trim().length > 0);
 
-  // Parse Hoste (20 columns)
+  // Parse Hoste (16 columns)
   const guestRows = valueRanges[1]?.values || [];
   const guests: Guest[] = guestRows.map((r: any[]) => {
     const propId = r[1] || '';
-    const nights = Math.max(1, parseInt(r[18]) || 1);
-    const lastName = r[4] || '';
-    const firstName = r[5] || '';
-    const nat = normalizeCountryCode(r[7] || 'DEU');
-    const resCountry = normalizeCountryCode(r[8] || nat);
-    const issCountry = normalizeCountryCode(r[13] || nat);
+    const lastName = r[2] || '';
+    const firstName = r[3] || '';
+    const nat = normalizeCountryCode(r[5] || 'DEU');
+    const resCountry = normalizeCountryCode(r[6] || nat);
 
     return {
       id: r[0] || `g_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       propertyId: propId,
-      unit: r[2] || '',
-      airbnbCode: r[3] || '',
       lastName,
       firstName,
-      fullName: `${firstName} ${lastName}`.trim() || 'Host',
-      birthDate: r[6] || '',
+      birthDate: r[4] || '',
       nationality: nat,
       residenceCountry: resCountry,
-      city: r[9] || '',
-      street: r[10] || '',
-      address: `${r[10] || ''} ${r[9] || ''}`.trim(),
-      idDocumentType: (r[11] || 'PAS').toUpperCase(),
-      idDocumentNumber: r[12] || '',
-      documentIssuerCountry: issCountry,
-      visaNumber: r[14] || '',
-      purposeOfStay: normalizePurposeCode(r[15] || '10'),
-      dateArrival: r[16] || '',
-      dateDeparture: r[17] || '',
-      nights,
-      createdAt: r[19] || new Date().toISOString()
+      city: r[7] || '',
+      street: r[8] || '',
+      address: `${r[8] || ''} ${r[7] || ''}`.trim(),
+      idDocumentNumber: r[9] || '',
+      visaNumber: r[10] || '',
+      purposeOfStay: normalizePurposeCode(r[11] || '10'),
+      dateArrival: r[12] || '',
+      dateDeparture: r[13] || '',
+      createdAt: r[14] || new Date().toISOString(),
+      note: r[15] || ''
     };
   }).filter((g: Guest) => (g.lastName || g.firstName || g.idDocumentNumber));
 
@@ -367,12 +366,10 @@ export async function syncAllToGoogleSheet(
     p.districtKey || 'praha8'
   ]);
 
-  // 2. Hoste rows (20 sloupců)
+  // 2. Hoste rows (16 sloupců)
   const guestRows = payload.guests.map(g => [
     g.id,
     g.propertyId || '',
-    g.unit || '',
-    g.airbnbCode || '',
     g.lastName || '',
     g.firstName || '',
     g.birthDate || '',
@@ -380,15 +377,13 @@ export async function syncAllToGoogleSheet(
     normalizeCountryCode(g.residenceCountry || g.nationality || 'DEU'),
     g.city || '',
     g.street || '',
-    g.idDocumentType || 'PAS',
     g.idDocumentNumber || '',
-    normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
     g.visaNumber || '',
     normalizePurposeCode(g.purposeOfStay || '10'),
     g.dateArrival || '',
     g.dateDeparture || '',
-    g.nights || 1,
-    g.createdAt || new Date().toISOString()
+    g.createdAt || new Date().toISOString(),
+    g.note || ''
   ]);
 
   // 3. Prehled_hlaseni rows: Nazev, IDUB, Zkratka, Celkem_cizincu_k_hlaseni, Celkem_noci, Cesi_vylouceni, Posledni_sync
@@ -396,7 +391,10 @@ export async function syncAllToGoogleSheet(
     const pGuests = payload.guests.filter(g => g.propertyId === p.id);
     const foreignGuests = pGuests.filter(g => !isCzechCitizen(g.nationality));
     const czechGuests = pGuests.filter(g => isCzechCitizen(g.nationality));
-    const totalNights = foreignGuests.reduce((s, g) => s + g.nights, 0);
+    const totalNights = foreignGuests.reduce(
+      (s, g) => s + calculateStayNights(g.dateArrival, g.dateDeparture),
+      0
+    );
 
     return [
       p.name,
@@ -414,7 +412,7 @@ export async function syncAllToGoogleSheet(
     method: 'POST',
     headers,
     body: JSON.stringify({
-      ranges: ['Ubytovani!A2:G500', 'Hoste!A2:T10000', 'Prehled_hlaseni!A2:G500', 'Nastaveni!A2:C10']
+      ranges: ['Ubytovani!A2:G500', 'Hoste!A2:P10000', 'Prehled_hlaseni!A2:G500', 'Nastaveni!A2:C10']
     })
   });
 
@@ -433,7 +431,7 @@ export async function syncAllToGoogleSheet(
     data.push({ range: `Ubytovani!A2:G${propRows.length + 1}`, values: propRows });
   }
   if (guestRows.length > 0) {
-    data.push({ range: `Hoste!A2:T${guestRows.length + 1}`, values: guestRows });
+    data.push({ range: `Hoste!A2:P${guestRows.length + 1}`, values: guestRows });
   }
   if (overviewRows.length > 0) {
     data.push({ range: `Prehled_hlaseni!A2:G${overviewRows.length + 1}`, values: overviewRows });

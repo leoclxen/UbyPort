@@ -6,7 +6,6 @@ export interface Property {
   hostName: string;      // Jméno / firma hostitele
   address: string;       // Jednolinková adresa pro přehledy
   districtKey?: string;
-  variableSymbol?: string;
   // Strukturovaná pole pro hlavičku UNL (Záznam typu A, 16 polí dle Přílohy č. 3)
   contact?: string;           // Pole 6: kontakt (0–50 znaků)
   district?: string;          // Pole 7: okres / v Praze obvod (0–32 znaků)
@@ -21,26 +20,20 @@ export interface Property {
 export interface Guest {
   id: string;
   propertyId: string;
-  unit: string;                    // Číslo pokoje / jednotky (interní evidence)
-  airbnbCode: string;              // Kód rezervace
   firstName: string;               // Jméno (0–24 znaků, Specifické Name v CP1250)
   lastName: string;                // Příjmení (1–50 znaků, Specifické Name v CP1250)
-  fullName: string;
   birthDate: string;               // Datum narození (YYYY-MM-DD nebo 00.00.0000)
   nationality: string;             // Státní příslušnost (3místný ISO 3166 / ICAO kód, např. DEU, SVK, USA)
   residenceCountry?: string;       // Stát trvalého bydliště (3místný ISO kód)
   city?: string;                   // Město / obec trvalého bydliště (1–42 znaků)
   street?: string;                 // Ulice a číslo domu bydliště (1–42 znaků)
   address?: string;                // Kompletní adresa
-  idDocumentType: 'PAS' | 'OP' | string; // Druh dokladu (PAS nebo OP)
   idDocumentNumber: string;        // Číslo cestovního dokladu (6–30 alfanum znaků bez mezer)
-  documentIssuerCountry?: string;  // Stát vydání dokladu (3místný ISO kód)
   visaNumber?: string;             // Číslo víza (0–15 alfanum znaků bez diakritiky)
   purposeOfStay: string;           // 2ciferný kód účelu pobytu dle číselníku (např. 10=turistika, 27=zaměstnání)
   note?: string;                   // Pole 16 záznamu U: Poznámka (0–255 znaků, '|' -> '\')
   dateArrival: string;             // Počátek ubytování (YYYY-MM-DD)
   dateDeparture: string;           // Konec ubytování (YYYY-MM-DD, musí být > dateArrival)
-  nights: number;
   createdAt: string;
 }
 

@@ -4,7 +4,8 @@ import {
   isCzechCitizen,
   parseDateToISO,
   normalizePurposeCode,
-  parseCzechAddress
+  parseCzechAddress,
+  calculateStayNights
 } from './ubyport';
 import { buildXlsxBlob, parseXlsxBuffer } from './xlsx';
 
@@ -34,10 +35,10 @@ const HEADERS = {
     'Kontakt', 'Okres', 'Obec', 'Cast_obce', 'Ulice', 'Cislo_domovni', 'Cislo_orientacni', 'PSC'
   ],
   Hoste: [
-    'ID', 'Ubytovani_ID', 'Pokoj_jednotka', 'Airbnb_kod', 'Prijmeni', 'Jmeno', 'Datum_narozeni',
-    'Statni_obcanstvi', 'Stat_bydliste', 'Obec_bydliste', 'Ulice_a_cp', 'Druh_dokladu',
-    'Cislo_dokladu', 'Stat_vydani_dokladu', 'Cislo_viza', 'Ucel_pobytu', 'Prijezd', 'Odjezd',
-    'Pocet_noci', 'Vytvoreno', 'Poznamka'
+    'ID', 'Ubytovani_ID', 'Prijmeni', 'Jmeno', 'Datum_narozeni',
+    'Statni_obcanstvi', 'Stat_bydliste', 'Obec_bydliste', 'Ulice_a_cp',
+    'Cislo_dokladu', 'Cislo_viza', 'Ucel_pobytu', 'Prijezd', 'Odjezd',
+    'Vytvoreno', 'Poznamka'
   ],
   Prehled_hlaseni: [
     'Nazev_ubytovani', 'IDUB', 'Zkratka_zarizeni', 'Celkem_cizincu_k_hlaseni', 'Celkem_noci',
@@ -281,25 +282,20 @@ export function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): 
 
   const iId = findCol(['id'], isExactUbyportLayout ? 0 : -1);
   const iPropId = findCol(['ubytovani_id', 'property_id', 'propertyid'], isExactUbyportLayout ? 1 : -1);
-  const iUnit = findCol(['pokoj_jednotka', 'pokoj', 'unit', 'apartman'], isExactUbyportLayout ? 2 : -1);
-  const iAirbnb = findCol(['airbnb_kod', 'airbnb_code', 'kod_rezervace'], isExactUbyportLayout ? 3 : -1);
-  const iLast = findCol(['prijmeni', 'last_name', 'lastname', 'surname'], isExactUbyportLayout ? 4 : -1);
-  const iFirst = findCol(['jmeno', 'first_name', 'firstname', 'given_name'], isExactUbyportLayout ? 5 : -1);
-  const iBirth = findCol(['datum_narozeni', 'narozeni', 'birth_date', 'birthdate', 'date_of_birth'], isExactUbyportLayout ? 6 : -1);
-  const iNat = findCol(['statni_obcanstvi', 'obcanstvi', 'nationality', 'citizenship'], isExactUbyportLayout ? 7 : -1);
-  const iRes = findCol(['stat_bydliste', 'residence_country', 'bydliste_stat'], isExactUbyportLayout ? 8 : -1);
-  const iCity = findCol(['obec_bydliste', 'mesto', 'obec', 'city'], isExactUbyportLayout ? 9 : -1);
-  const iStreet = findCol(['ulice_a_cp', 'ulice', 'street', 'adresa', 'home_address'], isExactUbyportLayout ? 10 : -1);
-  const iDocType = findCol(['druh_dokladu', 'typ_dokladu', 'document_type'], isExactUbyportLayout ? 11 : -1);
-  const iDocNum = findCol(['cislo_dokladu', 'doklad', 'pas', 'passport', 'passport_no'], isExactUbyportLayout ? 12 : -1);
-  const iDocCountry = findCol(['stat_vydani_dokladu', 'issuer_country'], isExactUbyportLayout ? 13 : -1);
-  const iVisa = findCol(['cislo_viza', 'viza', 'visa', 'visa_no'], isExactUbyportLayout ? 14 : -1);
-  const iPurpose = findCol(['ucel_pobytu', 'ucel', 'purpose', 'purpose_of_stay'], isExactUbyportLayout ? 15 : -1);
-  const iArr = findCol(['prijezd', 'check_in', 'checkin', 'date_arrival', 'arrival'], isExactUbyportLayout ? 16 : -1);
-  const iDep = findCol(['odjezd', 'check_out', 'checkout', 'date_departure', 'departure'], isExactUbyportLayout ? 17 : -1);
-  const iNights = findCol(['pocet_noci', 'noci', 'nights'], isExactUbyportLayout ? 18 : -1);
-  const iCreated = findCol(['vytvoreno', 'created_at', 'createdat'], isExactUbyportLayout ? 19 : -1);
-  const iNote = findCol(['poznamka', 'note'], -1);
+  const iLast = findCol(['prijmeni', 'last_name', 'lastname', 'surname'], isExactUbyportLayout ? 2 : -1);
+  const iFirst = findCol(['jmeno', 'first_name', 'firstname', 'given_name'], isExactUbyportLayout ? 3 : -1);
+  const iBirth = findCol(['datum_narozeni', 'narozeni', 'birth_date', 'birthdate', 'date_of_birth'], isExactUbyportLayout ? 4 : -1);
+  const iNat = findCol(['statni_obcanstvi', 'obcanstvi', 'nationality', 'citizenship'], isExactUbyportLayout ? 5 : -1);
+  const iRes = findCol(['stat_bydliste', 'residence_country', 'bydliste_stat'], isExactUbyportLayout ? 6 : -1);
+  const iCity = findCol(['obec_bydliste', 'mesto', 'obec', 'city'], isExactUbyportLayout ? 7 : -1);
+  const iStreet = findCol(['ulice_a_cp', 'ulice', 'street', 'adresa', 'home_address'], isExactUbyportLayout ? 8 : -1);
+  const iDocNum = findCol(['cislo_dokladu', 'doklad', 'pas', 'passport', 'passport_no'], isExactUbyportLayout ? 9 : -1);
+  const iVisa = findCol(['cislo_viza', 'viza', 'visa', 'visa_no'], isExactUbyportLayout ? 10 : -1);
+  const iPurpose = findCol(['ucel_pobytu', 'ucel', 'purpose', 'purpose_of_stay'], isExactUbyportLayout ? 11 : -1);
+  const iArr = findCol(['prijezd', 'check_in', 'checkin', 'date_arrival', 'arrival'], isExactUbyportLayout ? 12 : -1);
+  const iDep = findCol(['odjezd', 'check_out', 'checkout', 'date_departure', 'departure'], isExactUbyportLayout ? 13 : -1);
+  const iCreated = findCol(['vytvoreno', 'created_at', 'createdat'], isExactUbyportLayout ? 14 : -1);
+  const iNote = findCol(['poznamka', 'note'], isExactUbyportLayout ? 15 : -1);
 
   const getVal = (r: string[], col: number) => (col >= 0 && col < r.length ? (r[col] || '').trim() : '');
 
@@ -313,37 +309,29 @@ export function parseGuestsFromRows(rows: string[][], fallbackPropertyId = ''): 
 
       const nat = normalizeCountryCode(getVal(r, iNat) || 'DEU');
       const resCountry = normalizeCountryCode(getVal(r, iRes) || nat);
-      const issCountry = normalizeCountryCode(getVal(r, iDocCountry) || nat);
       const city = getVal(r, iCity);
       const street = getVal(r, iStreet);
       const arrIso = parseDateToISO(getVal(r, iArr)) || getVal(r, iArr);
       const depIso = parseDateToISO(getVal(r, iDep)) || getVal(r, iDep);
       const birthIso = parseDateToISO(getVal(r, iBirth)) || getVal(r, iBirth);
-      const nights = Math.max(1, parseInt(getVal(r, iNights), 10) || 1);
 
       return {
         id: getVal(r, iId) || `g_sheet_${Date.now()}_${rowIdx}`,
         propertyId: getVal(r, iPropId) || fallbackPropertyId,
-        unit: getVal(r, iUnit),
-        airbnbCode: getVal(r, iAirbnb).toUpperCase(),
         lastName,
         firstName,
-        fullName: `${firstName} ${lastName}`.trim() || 'Host',
         birthDate: birthIso,
         nationality: nat,
         residenceCountry: resCountry,
         city,
         street,
         address: `${street} ${city}`.trim(),
-        idDocumentType: (getVal(r, iDocType) || 'PAS').toUpperCase() === 'OP' ? 'OP' : 'PAS',
         idDocumentNumber: docNum,
-        documentIssuerCountry: issCountry,
         visaNumber: getVal(r, iVisa),
         purposeOfStay: normalizePurposeCode(getVal(r, iPurpose) || '10'),
         note: getVal(r, iNote),
         dateArrival: arrIso,
         dateDeparture: depIso,
-        nights,
         createdAt: getVal(r, iCreated) || new Date().toISOString()
       } as Guest;
     })
@@ -451,8 +439,6 @@ function buildGuestTableRows(guests: Guest[]): (string | number)[][] {
   return guests.map(g => [
     g.id,
     g.propertyId || '',
-    g.unit || '',
-    g.airbnbCode || '',
     g.lastName || '',
     g.firstName || '',
     g.birthDate || '',
@@ -460,14 +446,11 @@ function buildGuestTableRows(guests: Guest[]): (string | number)[][] {
     normalizeCountryCode(g.residenceCountry || g.nationality || 'DEU'),
     g.city || '',
     g.street || '',
-    g.idDocumentType || 'PAS',
     g.idDocumentNumber || '',
-    normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
     g.visaNumber || '',
     normalizePurposeCode(g.purposeOfStay || '10'),
     g.dateArrival || '',
     g.dateDeparture || '',
-    g.nights || 1,
     g.createdAt || new Date().toISOString(),
     g.note || ''
   ]);
@@ -498,7 +481,10 @@ function buildOverviewTableRows(properties: Property[], guests: Guest[]): (strin
     const pGuests = guests.filter(g => g.propertyId === p.id);
     const foreignGuests = pGuests.filter(g => !isCzechCitizen(g.nationality));
     const czechGuests = pGuests.filter(g => isCzechCitizen(g.nationality));
-    const totalNights = foreignGuests.reduce((s, g) => s + g.nights, 0);
+    const totalNights = foreignGuests.reduce(
+      (s, g) => s + calculateStayNights(g.dateArrival, g.dateDeparture),
+      0
+    );
     return [
       p.name,
       p.idub || '',

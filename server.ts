@@ -62,7 +62,6 @@ export interface Property {
   hostName: string;
   address: string;
   districtKey?: string;
-  variableSymbol?: string;
   contact?: string;
   district?: string;
   municipality?: string;
@@ -76,26 +75,20 @@ export interface Property {
 export interface Guest {
   id: string;
   propertyId: string;
-  unit: string;
-  airbnbCode: string;
   firstName: string;
   lastName: string;
-  fullName: string;
   birthDate: string;
   nationality: string;
   residenceCountry?: string;
   city?: string;
   street?: string;
   address?: string;
-  idDocumentType: string;
   idDocumentNumber: string;
-  documentIssuerCountry?: string;
   visaNumber?: string;
   purposeOfStay: string;
   note?: string;
   dateArrival: string;
   dateDeparture: string;
-  nights: number;
   createdAt: string;
 }
 
@@ -188,7 +181,6 @@ app.post('/api/properties', (req, res) => {
     hostName,
     address,
     districtKey,
-    variableSymbol,
     contact,
     district,
     municipality,
@@ -214,7 +206,6 @@ app.post('/api/properties', (req, res) => {
     hostName: (hostName || '').trim(),
     address: (address || '').trim(),
     districtKey: districtKey || 'praha8',
-    variableSymbol: (variableSymbol || '').trim(),
     contact: (contact || '').trim(),
     district: (district || '').trim(),
     municipality: (municipality || '').trim(),
@@ -269,31 +260,24 @@ app.post('/api/guests', (req, res) => {
   const g = req.body;
 
   const id = g.id || `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const nights = Math.max(1, parseInt(g.nights) || 1);
 
   const guestRecord: Guest = {
     id,
     propertyId: g.propertyId || data.meta.activePropertyId,
-    unit: (g.unit || '').trim(),
-    airbnbCode: (g.airbnbCode || '').trim().toUpperCase(),
     firstName: (g.firstName || '').trim(),
     lastName: (g.lastName || '').trim(),
-    fullName: (g.fullName || `${g.firstName || ''} ${g.lastName || ''}`).trim() || 'Host',
     birthDate: g.birthDate || '',
     nationality: (g.nationality || '').trim().toUpperCase(),
     residenceCountry: (g.residenceCountry || g.nationality || '').trim().toUpperCase(),
     city: (g.city || '').trim(),
     street: (g.street || '').trim(),
     address: (g.address || '').trim(),
-    idDocumentType: (g.idDocumentType || 'PAS').trim().toUpperCase(),
     idDocumentNumber: (g.idDocumentNumber || '').trim(),
-    documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
     visaNumber: (g.visaNumber || '').trim(),
     purposeOfStay: (g.purposeOfStay || '10').trim(),
     note: (g.note || '').trim(),
     dateArrival: g.dateArrival || '',
     dateDeparture: g.dateDeparture || '',
-    nights,
     createdAt: g.createdAt || new Date().toISOString()
   };
 
@@ -346,7 +330,6 @@ app.post('/api/batch-guests', (req, res) => {
         hostName: property.hostName || '',
         address: property.address || '',
         districtKey: property.districtKey || 'praha8',
-        variableSymbol: property.variableSymbol || '',
         contact: property.contact || '',
         district: property.district || '',
         municipality: property.municipality || '',
@@ -365,30 +348,23 @@ app.post('/api/batch-guests', (req, res) => {
 
   if (Array.isArray(incomingGuests)) {
     incomingGuests.forEach((g: any) => {
-      const nights = Math.max(1, parseInt(g.nights) || 1);
       data.guests.unshift({
         id: g.id || `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         propertyId: propId,
-        unit: (g.unit || '').trim(),
-        airbnbCode: (g.airbnbCode || '').trim().toUpperCase(),
         firstName: (g.firstName || '').trim(),
         lastName: (g.lastName || '').trim(),
-        fullName: (g.fullName || `${g.firstName || ''} ${g.lastName || ''}`).trim() || 'Host',
         birthDate: g.birthDate || '',
         nationality: (g.nationality || '').trim().toUpperCase(),
         residenceCountry: (g.residenceCountry || g.nationality || '').trim().toUpperCase(),
         city: (g.city || '').trim(),
         street: (g.street || '').trim(),
         address: (g.address || '').trim(),
-        idDocumentType: (g.idDocumentType || 'PAS').trim().toUpperCase(),
         idDocumentNumber: (g.idDocumentNumber || '').trim(),
-        documentIssuerCountry: (g.documentIssuerCountry || g.nationality || '').trim().toUpperCase(),
         visaNumber: (g.visaNumber || '').trim(),
         purposeOfStay: (g.purposeOfStay || '10').trim(),
         note: (g.note || '').trim(),
         dateArrival: g.dateArrival || '',
         dateDeparture: g.dateDeparture || '',
-        nights,
         createdAt: new Date().toISOString()
       });
     });
@@ -509,18 +485,15 @@ Struktura formuláře:
 1. HLAVIČKA POBYTU A ZAŘÍZENÍ:
    - Check-in: převeď na ISO datum YYYY-MM-DD (např. 'OCT 1, 2026' -> '2026-10-01').
    - Check-out: převeď na ISO datum YYYY-MM-DD (např. 'OCT 8, 2026' -> '2026-10-08').
-   - Počet nocí (nights): celé číslo z pole 'nights' (např. '7 nights' -> 7).
-   - Označení jednotky / pokoje (detectedUnit): např. 'Unit E302' nebo '102'.
    - Název rezidence / ubytování (detectedPropertyName): např. 'Karolina Plazza - Karlín'.
    - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8' nebo 'Květinková 2570/17, 130 00 Praha 3'.
    - IDUB ubytovacího zařízení (detectedIDUB): pokud je uvedeno (např. CZ1234567890).
    - Zkratka zařízení (detectedFacilityCode): max 5 znaků (např. HOTEL, APART).
    - Ubytovatel / Hostitel (detectedHostName): např. 'Bc. Michaela Heidenreichová'.
-   - IČO / Variabilní symbol (detectedVS): např. '17974305'.
 
 2. TABULKA UBYTOVANÝCH OSOB:
    - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
-   - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
+   - Všechny osoby sdílejí Check-in a Check-out z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
      * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. NOVÁK nebo MÜLLER).
      * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. JAN nebo TOMÁŠ).
@@ -534,7 +507,6 @@ Struktura formuláře:
        Pokud je 'SK' nebo 'Slovensko', 'SVK'.
      * passportNumber: Číslo cestovního pasu nebo OP ze sloupce 'č. cestovního dokladu / Passport No'.
        KRITICKÉ: Pokud je ve sloupci cokoliv zapsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
-     * documentType: 'OP' pro občanský průkaz (ID card), 'PAS' pro cestovní pas. Pokud není zřejmé, použij 'PAS'.
      * homeAddress: Celá adresa ze sloupce 'trvalé bydliště v zahraničí / Home Address' (např. '6917 S Queen St, Littleton Co').
      * city: Město trvalého bydliště z adresy (např. 'Littleton').
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').

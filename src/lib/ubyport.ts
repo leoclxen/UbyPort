@@ -1313,15 +1313,6 @@ export function parseUnlContent(
       const isoArr = parseDateToISO(arrival);
       const isoDep = parseDateToISO(departure);
 
-      let nights = 1;
-      if (isoArr && isoDep) {
-        const a = new Date(isoArr).getTime();
-        const d = new Date(isoDep).getTime();
-        if (!isNaN(a) && !isNaN(d) && d > a) {
-          nights = Math.max(1, Math.round((d - a) / (1000 * 60 * 60 * 24)));
-        }
-      }
-
       const cleanLastName = cleanCp1250Name(lastName);
       const cleanFirstName = cleanCp1250Name(firstName);
       const parsedRes = parseResidenceField(rawResidence, nationality);
@@ -1329,26 +1320,20 @@ export function parseUnlContent(
       const guest: Guest = {
         id: `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         propertyId: targetPropertyId || '',
-        unit: '',
-        airbnbCode: '',
         lastName: cleanLastName,
         firstName: cleanFirstName,
-        fullName: `${cleanFirstName} ${cleanLastName}`.trim(),
         birthDate: isoBirth,
         nationality,
         residenceCountry: parsedRes.residenceCountry || nationality,
         city: cleanCp1250Bydliste(parsedRes.city),
         street: cleanCp1250Bydliste(parsedRes.street),
         address: cleanCp1250Bydliste([parsedRes.street, parsedRes.city].filter(Boolean).join(', ')),
-        idDocumentType: 'PAS',
         idDocumentNumber: cleanAsciiUpper(docNumber).replace(/[^A-Z0-9]/g, ''),
-        documentIssuerCountry: nationality,
         visaNumber: sanitizeCp1250Field(visaNumber, false).replace(/[^a-zA-Z0-9]/g, ''),
         purposeOfStay: purpose,
         note: sanitizeCp1250Field(note, true),
         dateArrival: isoArr,
         dateDeparture: isoDep,
-        nights,
         createdAt: new Date().toISOString()
       };
 
@@ -1365,6 +1350,19 @@ export function parseUnlContent(
     detectedProperty,
     errors
   };
+}
+
+/**
+ * Dynamicky vypočítá počet nocí pobytu z dat příjezdu a odjezdu (min. 1 noc)
+ */
+export function calculateStayNights(dateArrival?: string, dateDeparture?: string): number {
+  const isoArr = parseDateToISO(dateArrival);
+  const isoDep = parseDateToISO(dateDeparture);
+  if (!isoArr || !isoDep) return 1;
+  const arrMs = new Date(isoArr).getTime();
+  const depMs = new Date(isoDep).getTime();
+  if (isNaN(arrMs) || isNaN(depMs) || depMs <= arrMs) return 1;
+  return Math.max(1, Math.round((depMs - arrMs) / (1000 * 60 * 60 * 24)));
 }
 
 /**

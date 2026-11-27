@@ -449,6 +449,7 @@ export default function App() {
   const [editingGuest, setEditingGuest] = useState<Guest | null>(null);
 
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [isResetAppModalOpen, setIsResetAppModalOpen] = useState<boolean>(false);
   const [isMissingKeyModalOpen, setIsMissingKeyModalOpen] = useState<boolean>(false);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState<boolean>(false);
   const [availableModels, setAvailableModels] = useState<GeminiModelInfo[]>(CURATED_OCR_MODELS);
@@ -494,8 +495,7 @@ export default function App() {
     facilityCode: '',
     hostName: '',
     address: '',
-    districtKey: 'praha8',
-    variableSymbol: ''
+    districtKey: 'praha8'
   });
   const [scanGuestAddressChecks, setScanGuestAddressChecks] = useState<Record<number, AddressVerificationResult>>({});
   const [scanPropAddressCheck, setScanPropAddressCheck] = useState<AddressVerificationResult | null>(null);
@@ -556,7 +556,6 @@ export default function App() {
     hostName: '',
     address: '',
     districtKey: 'praha8',
-    variableSymbol: '',
     contact: '',
     district: '',
     municipality: '',
@@ -569,8 +568,6 @@ export default function App() {
 
   // Guest form state
   const [guestForm, setGuestForm] = useState({
-    unit: '',
-    airbnbCode: '',
     firstName: '',
     lastName: '',
     birthDate: '',
@@ -579,15 +576,12 @@ export default function App() {
     city: '',
     street: '',
     address: '',
-    idDocumentType: 'PAS',
     idDocumentNumber: '',
-    documentIssuerCountry: 'DEU',
     visaNumber: '',
     purposeOfStay: '10',
     note: '',
     dateArrival: '',
-    dateDeparture: '',
-    nights: 1
+    dateDeparture: ''
   });
 
   const showToast = (message: string, type: 'success' | 'warning' | 'info' = 'info') => {
@@ -600,11 +594,13 @@ export default function App() {
   // Local persistence helper (works on static hosts and inside iframes)
   const persistLocalState = (props: Property[], gst: Guest[], activeId?: string) => {
     try {
+      const resolvedActiveId =
+        activeId !== undefined ? activeId : (activePropertyId || props[0]?.id || '');
       safeStorage.setItem('ubyport_local_yaml', jsyaml.dump({
         meta: {
           version: APP_VERSION,
           lastUpdated: new Date().toISOString(),
-          activePropertyId: activeId || activePropertyId || props[0]?.id || ''
+          activePropertyId: resolvedActiveId
         },
         properties: props,
         guests: gst
@@ -642,7 +638,7 @@ export default function App() {
 
       if (!loadedFromServer) {
         // Fallback to local storage
-        const localYaml = safeStorage.getItem('ubyport_local_yaml') || safeStorage.getItem('airtax_local_yaml');
+        const localYaml = safeStorage.getItem('ubyport_local_yaml');
         if (localYaml) {
           try {
             const parsed = jsyaml.load(localYaml) as any;
@@ -1273,7 +1269,6 @@ export default function App() {
       hostName: '',
       address: '',
       districtKey: 'praha8',
-      variableSymbol: '',
       contact: '',
       district: '',
       municipality: '',
@@ -1298,7 +1293,6 @@ export default function App() {
       hostName: prop.hostName || '',
       address: prop.address || '',
       districtKey: prop.districtKey || 'praha8',
-      variableSymbol: prop.variableSymbol || '',
       contact: prop.contact ?? resolved.kontakt,
       district: prop.district ?? resolved.okres,
       municipality: prop.municipality ?? resolved.obec,
@@ -1387,7 +1381,6 @@ export default function App() {
       hostName: propForm.hostName.trim(),
       address: propForm.address.trim() || fallbackAddress,
       districtKey: propForm.districtKey || 'praha8',
-      variableSymbol: propForm.variableSymbol.trim(),
       contact: sanitizeCp1250Field(propForm.contact || propForm.hostName, false),
       district: sanitizeCp1250Field(propForm.district, false),
       municipality: sanitizeCp1250Field(propForm.municipality, false),
@@ -1453,8 +1446,6 @@ export default function App() {
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
     setGuestForm({
-      unit: '',
-      airbnbCode: '',
       firstName: '',
       lastName: '',
       birthDate: '',
@@ -1463,15 +1454,12 @@ export default function App() {
       city: '',
       street: '',
       address: '',
-      idDocumentType: 'PAS',
       idDocumentNumber: '',
-      documentIssuerCountry: 'DEU',
       visaNumber: '',
       purposeOfStay: '10',
       note: '',
       dateArrival: today,
-      dateDeparture: tomorrow,
-      nights: 1
+      dateDeparture: tomorrow
     });
     setEditingGuest(null);
     setGuestAddressCheck(null);
@@ -1480,8 +1468,6 @@ export default function App() {
 
   const openEditGuestModal = (g: Guest) => {
     setGuestForm({
-      unit: g.unit || '',
-      airbnbCode: g.airbnbCode || '',
       firstName: g.firstName || '',
       lastName: g.lastName || '',
       birthDate: parseDateToISO(g.birthDate),
@@ -1490,15 +1476,12 @@ export default function App() {
       city: g.city || '',
       street: g.street || '',
       address: g.address || '',
-      idDocumentType: g.idDocumentType || 'PAS',
       idDocumentNumber: g.idDocumentNumber || '',
-      documentIssuerCountry: normalizeCountryCode(g.documentIssuerCountry || g.nationality || 'DEU'),
       visaNumber: g.visaNumber || '',
       purposeOfStay: normalizePurposeCode(g.purposeOfStay || '10'),
       note: g.note || '',
       dateArrival: parseDateToISO(g.dateArrival),
-      dateDeparture: parseDateToISO(g.dateDeparture),
-      nights: g.nights || 1
+      dateDeparture: parseDateToISO(g.dateDeparture)
     });
     setEditingGuest(g);
     setGuestAddressCheck(null);
@@ -1527,10 +1510,8 @@ export default function App() {
 
     const nat = normalizeCountryCode(guestForm.nationality);
     const resC = normalizeCountryCode(guestForm.residenceCountry || nat);
-    const issC = normalizeCountryCode(guestForm.documentIssuerCountry || nat);
 
     const guestId = editingGuest ? editingGuest.id : `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const nights = Math.max(1, parseInt(String(guestForm.nights)) || 1);
 
     const cleanFirst = cleanCp1250Name(guestForm.firstName);
     const cleanLast = cleanCp1250Name(guestForm.lastName);
@@ -1540,26 +1521,20 @@ export default function App() {
     const guestRecord: Guest = {
       id: guestId,
       propertyId: activeProperty.id,
-      unit: guestForm.unit.trim(),
-      airbnbCode: guestForm.airbnbCode.trim().toUpperCase(),
       firstName: cleanFirst,
       lastName: cleanLast,
-      fullName: `${cleanFirst} ${cleanLast}`.trim(),
       birthDate: guestForm.birthDate,
       nationality: nat,
       residenceCountry: resC,
       city: cleanCity,
       street: cleanStreet,
       address: `${cleanStreet}${cleanStreet && cleanCity ? ', ' : ''}${cleanCity}`.trim(),
-      idDocumentType: cleanAsciiUpper(guestForm.idDocumentType) === 'OP' ? 'OP' : 'PAS',
       idDocumentNumber: cleanAsciiUpper(guestForm.idDocumentNumber).replace(/[^A-Z0-9]/g, ''),
-      documentIssuerCountry: issC,
       visaNumber: sanitizeCp1250Field(guestForm.visaNumber, false).replace(/[^a-zA-Z0-9]/g, ''),
       purposeOfStay: normalizePurposeCode(guestForm.purposeOfStay || '10'),
       note: sanitizeCp1250Field(guestForm.note, true),
       dateArrival: guestForm.dateArrival,
       dateDeparture: guestForm.dateDeparture,
-      nights,
       createdAt: editingGuest?.createdAt || new Date().toISOString()
     };
 
@@ -2059,8 +2034,7 @@ export default function App() {
           facilityCode: detectedFacilityCode || '',
           hostName: detectedHost || '',
           address: detectedAddress || 'Praha',
-          districtKey: resultData.detectedDistrictKey || 'praha8',
-          variableSymbol: resultData.detectedVS || ''
+          districtKey: resultData.detectedDistrictKey || 'praha8'
         });
         setScanGuestAddressChecks({});
         setScanPropAddressCheck(null);
@@ -2184,7 +2158,6 @@ export default function App() {
         hostName: scanNewPropForm.hostName.trim(),
         address: scanNewPropForm.address.trim(),
         districtKey: scanNewPropForm.districtKey || 'praha8',
-        variableSymbol: scanNewPropForm.variableSymbol.trim(),
         contact: sanitizeCp1250Field(scanNewPropForm.hostName, false),
         district: osmAddr?.normalizedDistrict || parsedAddr.district,
         municipality: osmAddr?.normalizedMunicipality || parsedAddr.municipality,
@@ -2203,13 +2176,10 @@ export default function App() {
     const parentProp = updatedProps.find(p => p.id === targetPropId);
     const dateArrival = pendingScanData.detected.dateArrival || new Date().toISOString().split('T')[0];
     const dateDeparture = pendingScanData.detected.dateDeparture || new Date(Date.now() + 86400000).toISOString().split('T')[0];
-    const nights = Math.max(1, parseInt(pendingScanData.detected.nights) || 1);
-    const unit = pendingScanData.detected.detectedUnit || '';
 
     const newGuests: Guest[] = pendingScanData.guests.map((g: any) => {
       const nat = normalizeCountryCode(g.nationality);
       const resC = normalizeCountryCode(g.residenceCountry || nat);
-      const issC = normalizeCountryCode(g.documentIssuerCountry || nat);
       let { city = '', street = '' } = g;
       if (!city && g.homeAddress) {
         const parsed = parseAddressParts(g.homeAddress);
@@ -2225,26 +2195,20 @@ export default function App() {
       return {
         id: `g_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         propertyId: targetPropId,
-        unit: (unit || g.unit || '1').trim(),
-        airbnbCode: '',
         firstName: cleanFirst,
         lastName: cleanLast,
-        fullName: `${cleanFirst} ${cleanLast}`.trim(),
         birthDate: g.birthDate || '',
         nationality: nat,
         residenceCountry: resC,
         city: cleanCity,
         street: cleanStreet,
         address: `${cleanStreet}${cleanStreet && cleanCity ? ', ' : ''}${cleanCity}`.trim(),
-        idDocumentType: cleanAsciiUpper(g.documentType) === 'OP' ? 'OP' : 'PAS',
         idDocumentNumber: cleanAsciiUpper(g.passportNumber || g.idDocumentNumber || '').replace(/[^A-Z0-9]/g, ''),
-        documentIssuerCountry: issC,
         visaNumber: sanitizeCp1250Field(g.visaNumber || '', false).replace(/[^a-zA-Z0-9]/g, ''),
         purposeOfStay: normalizePurposeCode(g.purposeOfStay || '10'),
         note: '',
         dateArrival,
         dateDeparture,
-        nights,
         createdAt: new Date().toISOString()
       };
     });
@@ -2591,37 +2555,105 @@ export default function App() {
     await saveNonSecretSettingsPrefs();
   };
 
+  // FACTORY RESET APPLICATION (clears localStorage, sessionStorage & RAM, re-initializes empty DB)
+  const handleConfirmFactoryReset = async () => {
+    try {
+      localStorage.clear();
+    } catch {}
+    try {
+      sessionStorage.clear();
+    } catch {}
+    if (typeof window !== 'undefined' && (window as any).__fallbackStorage) {
+      (window as any).__fallbackStorage = {};
+    }
+
+    try {
+      await googleLogout();
+    } catch {}
+    try {
+      clearStoredAccessToken();
+    } catch {}
+    try {
+      setCustomOAuthClientId('');
+    } catch {}
+    try {
+      clearManualFirebaseConfig();
+    } catch {}
+
+    const defaultModel = 'gemini-2.5-flash';
+    const defaultFbProjectId = getFirebaseProjectId();
+
+    setProperties([]);
+    setGuests([]);
+    setActivePropertyId('');
+    setPropSearchQuery('');
+    setLedgerFilter('all');
+    setActiveTab('scan');
+
+    setActiveModelName(defaultModel);
+    setAvailableModels(CURATED_OCR_MODELS);
+    setModelsError(null);
+    setModelSearchQuery('');
+
+    setUserApiKey('');
+    setShowApiKey(false);
+    lastUnlockedKeyRef.current = '';
+    setKeychainAccountName('UbyExport Google API');
+    setFbKeychainAccountName('UbyExport Firebase');
+
+    setActiveSheetMode('pub');
+    setAuthMethodChoice('gis');
+    setFirebaseSeparateKey(false);
+    setIsUnlockExtraExpanded(false);
+    setFirebaseApiKeyInput('');
+    setFirebaseProjectIdInput(defaultFbProjectId);
+    setCustomOAuthClientIdState('');
+    setCustomSheetId('');
+    setPublicSheetUrl('');
+    setPublicSheetInput('');
+    setPublicSheetLastSync('');
+    setPublicSheetError(null);
+
+    setCurrentUser(null);
+    setGoogleToken(null);
+    setConnectedSheet(null);
+
+    setExportedGuestSignatures({});
+    setDeleteGuestsModalState(null);
+    setPendingImportSession(null);
+    setPendingScanData(null);
+    setImagePreview(null);
+    setScanStatus('');
+
+    persistLocalState([], [], '');
+
+    await syncServerApi('/api/reset-data', { method: 'POST' });
+
+    setIsResetAppModalOpen(false);
+    setIsSettingsModalOpen(false);
+    showToast(
+      `Aplikace byla resetována a databáze znovu inicializována pro verzi ${APP_VERSION}.`,
+      'success'
+    );
+  };
+
   // DATE INPUT HELPER
   const handleArrivalDateChange = (val: string) => {
     setGuestForm(prev => {
       let dep = prev.dateDeparture;
-      let nights = prev.nights;
       if (val && dep) {
         const a = new Date(val).getTime();
         const d = new Date(dep).getTime();
-        if (!isNaN(a) && !isNaN(d) && d > a) {
-          nights = Math.max(1, Math.round((d - a) / (1000 * 60 * 60 * 24)));
-        } else {
+        if (isNaN(a) || isNaN(d) || d <= a) {
           dep = new Date(new Date(val).getTime() + 86400000).toISOString().split('T')[0];
-          nights = 1;
         }
       }
-      return { ...prev, dateArrival: val, dateDeparture: dep, nights };
+      return { ...prev, dateArrival: val, dateDeparture: dep };
     });
   };
 
   const handleDepartureDateChange = (val: string) => {
-    setGuestForm(prev => {
-      let nights = prev.nights;
-      if (prev.dateArrival && val) {
-        const a = new Date(prev.dateArrival).getTime();
-        const d = new Date(val).getTime();
-        if (!isNaN(a) && !isNaN(d) && d > a) {
-          nights = Math.max(1, Math.round((d - a) / (1000 * 60 * 60 * 24)));
-        }
-      }
-      return { ...prev, dateDeparture: val, nights };
-    });
+    setGuestForm(prev => ({ ...prev, dateDeparture: val }));
   };
 
   return (
@@ -3137,16 +3169,9 @@ export default function App() {
                               <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
                                 {guest.nationality || 'DEU'}
                               </span>
-                              {guest.unit && (
-                                <span className="text-[10px] text-slate-400 font-mono">
-                                  Pokoj {guest.unit}
-                                </span>
-                              )}
                             </div>
-                            <div className="text-[11px] text-slate-400 mt-0.5 space-x-2">
+                            <div className="text-[11px] text-slate-400 mt-0.5">
                               <span>{formatDateDDMMYYYY(guest.dateArrival)} – {formatDateDDMMYYYY(guest.dateDeparture)}</span>
-                              <span>•</span>
-                              <span>{guest.nights} {guest.nights === 1 ? 'noc' : guest.nights < 5 ? 'noci' : 'nocí'}</span>
                             </div>
                           </div>
 
@@ -3172,7 +3197,7 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-slate-800/60 font-mono text-slate-300">
                           <div>
                             <span className="text-slate-500">Doklad: </span>
-                            <span>{guest.idDocumentType || 'PAS'} {guest.idDocumentNumber || 'Neuvedeno'}</span>
+                            <span>{guest.idDocumentNumber || 'Neuvedeno'}</span>
                           </div>
                           <div>
                             <span className="text-slate-500">Bydliště: </span>
@@ -3384,17 +3409,14 @@ export default function App() {
                         </div>
 
                         {/* Bottom Action: Zobrazit v knize */}
-                        <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 text-xs">
-                          <span className="text-[11px] text-slate-500 font-mono">
-                            VS: {prop.variableSymbol || '–'}
-                          </span>
+                        <div className="flex items-center justify-end pt-1 border-t border-slate-800/60 text-xs">
                           <button
                             onClick={() => {
                               setActivePropertyId(prop.id);
                               persistLocalState(properties, guests, prop.id);
                               setActiveTab('ledger');
                             }}
-                            className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 font-semibold tap-active"
+                            className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 font-semibold tap-active cursor-pointer"
                           >
                             <BookOpen className="w-3.5 h-3.5" />
                             <span>Zobrazit knihu hostů</span>
@@ -4183,35 +4205,6 @@ export default function App() {
             </div>
 
             <form onSubmit={handleSaveGuest} className="space-y-3 text-xs">
-              {/* Pokoj / Unit & Airbnb code */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Číslo pokoje / jednotky *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={guestForm.unit}
-                    onChange={e => setGuestForm(prev => ({ ...prev, unit: e.target.value }))}
-                    placeholder="např. 102 nebo E302"
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Rezervační kód (Airbnb)
-                  </label>
-                  <input
-                    type="text"
-                    value={guestForm.airbnbCode}
-                    onChange={e => setGuestForm(prev => ({ ...prev, airbnbCode: e.target.value }))}
-                    placeholder="např. HMAXYZ123"
-                    className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
-                </div>
-              </div>
-
               {/* Jméno a Příjmení + kontrola existence a OCR překlepů */}
               {(() => {
                 const nameCheck = verifyGuestNameOcr(guestForm.firstName, guestForm.lastName);
@@ -4333,8 +4326,7 @@ export default function App() {
                       setGuestForm(prev => ({
                         ...prev,
                         nationality: val,
-                        residenceCountry: prev.residenceCountry || val,
-                        documentIssuerCountry: prev.documentIssuerCountry || val
+                        residenceCountry: prev.residenceCountry || val
                       }));
                     }}
                     placeholder="např. DEU, USA, SVK"
@@ -4464,22 +4456,9 @@ export default function App() {
                   )}
               </div>
 
-              {/* Doklad: Druh, Číslo, Stát vydání, Vízo */}
-              <div className="grid grid-cols-4 gap-2">
+              {/* Číslo dokladu & Číslo víza */}
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Doklad *
-                  </label>
-                  <select
-                    value={guestForm.idDocumentType}
-                    onChange={e => setGuestForm(prev => ({ ...prev, idDocumentType: e.target.value }))}
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-2 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  >
-                    <option value="PAS">PAS (Pas)</option>
-                    <option value="OP">OP (Občanka)</option>
-                  </select>
-                </div>
-                <div className="col-span-2">
                   <label className="block text-slate-400 font-semibold mb-1">
                     Číslo dokladu *
                   </label>
@@ -4489,27 +4468,9 @@ export default function App() {
                     value={guestForm.idDocumentNumber}
                     onChange={e => setGuestForm(prev => ({ ...prev, idDocumentNumber: e.target.value }))}
                     placeholder="např. C12345678"
-                    className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
                   />
                 </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Stát vydání *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={3}
-                    value={guestForm.documentIssuerCountry}
-                    onChange={e => setGuestForm(prev => ({ ...prev, documentIssuerCountry: normalizeCountryCode(e.target.value) }))}
-                    placeholder="DEU"
-                    className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
-                  />
-                </div>
-              </div>
-
-              {/* Číslo víza (volitelné) a Účel pobytu */}
-              <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">
                     Číslo víza (volitelné)
@@ -4519,29 +4480,31 @@ export default function App() {
                     value={guestForm.visaNumber}
                     onChange={e => setGuestForm(prev => ({ ...prev, visaNumber: e.target.value }))}
                     placeholder="Prázdné u bezvízových"
-                    className="w-full bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white font-mono rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none uppercase"
                   />
-                </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Účel pobytu *
-                  </label>
-                  <select
-                    value={guestForm.purposeOfStay}
-                    onChange={e => setGuestForm(prev => ({ ...prev, purposeOfStay: e.target.value }))}
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  >
-                    {UBYPORT_PURPOSES.map(p => (
-                      <option key={p.code} value={p.code}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
                 </div>
               </div>
 
-              {/* Data pobytu & Počet nocí */}
-              <div className="grid grid-cols-3 gap-2">
+              {/* Účel pobytu */}
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1">
+                  Účel pobytu *
+                </label>
+                <select
+                  value={guestForm.purposeOfStay}
+                  onChange={e => setGuestForm(prev => ({ ...prev, purposeOfStay: e.target.value }))}
+                  className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                >
+                  {UBYPORT_PURPOSES.map(p => (
+                    <option key={p.code} value={p.code}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Data pobytu */}
+              <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">
                     Příjezd *
@@ -4551,7 +4514,7 @@ export default function App() {
                     required
                     value={guestForm.dateArrival}
                     onChange={e => handleArrivalDateChange(e.target.value)}
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
                 </div>
                 <div>
@@ -4563,19 +4526,7 @@ export default function App() {
                     required
                     value={guestForm.dateDeparture}
                     onChange={e => handleDepartureDateChange(e.target.value)}
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 font-semibold mb-1">
-                    Počet nocí
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={guestForm.nights}
-                    onChange={e => setGuestForm(prev => ({ ...prev, nights: Math.max(1, parseInt(e.target.value) || 1) }))}
-                    className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                    className="w-full min-h-[44px] bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                   />
                 </div>
               </div>
@@ -5057,7 +5008,7 @@ export default function App() {
 
                       <div className="text-[11px] text-slate-400 grid grid-cols-2 gap-1 font-mono pt-0.5">
                         <span>Narozen: {g.birthDate || 'neuvedeno'}</span>
-                        <span>Doklad: {g.documentType || 'PAS'} {g.passportNumber || 'neuveden'}</span>
+                        <span>Doklad: {g.passportNumber || 'neuveden'}</span>
                       </div>
                       {isCzech && (
                         <p className="text-[10px] text-amber-400">
@@ -5128,10 +5079,10 @@ export default function App() {
                   <div>
                     <p className="font-bold text-white">{g.lastName} {g.firstName}</p>
                     <p className="text-[11px] text-slate-400 font-mono">
-                      {g.nationality} • Pokoj {g.unit} • {formatDateDDMMYYYY(g.dateArrival)}–{formatDateDDMMYYYY(g.dateDeparture)}
+                      {g.nationality} • {formatDateDDMMYYYY(g.dateArrival)}–{formatDateDDMMYYYY(g.dateDeparture)}
                     </p>
                   </div>
-                  <span className="text-[10px] text-slate-400 font-mono">{g.idDocumentType} {g.idDocumentNumber}</span>
+                  <span className="text-[10px] text-slate-400 font-mono">{g.idDocumentNumber}</span>
                 </div>
               ))}
             </div>
@@ -5238,6 +5189,26 @@ export default function App() {
                 </p>
               </div>
 
+              {/* AKTIVNÍ MODEL OCR (přímo pod API klíčem) */}
+              <div>
+                <label className="block text-slate-300 font-bold mb-1">
+                  Aktivní model OCR
+                </label>
+                <div className="flex items-center justify-between bg-slate-800 border border-slate-700 rounded-xl p-2.5">
+                  <span className="font-mono text-blue-400 font-bold truncate">{activeModelName}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSettingsModalOpen(false);
+                      openModelSelector();
+                    }}
+                    className="min-h-[36px] px-3 py-1 bg-slate-700 hover:bg-slate-650 text-white rounded-lg text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Změnit model
+                  </button>
+                </div>
+              </div>
+
               {/* SJEDNOCENÉ NAPOJENÍ GOOGLE SHEETU (1 TYP) + POZNÁMKA BEZ HESEL */}
               <SheetAndNoteConfigSection
                 idPrefix="settings-sheet"
@@ -5279,24 +5250,22 @@ export default function App() {
                 onToast={showToast}
               />
 
-              {/* AKTIVNÍ MODEL OCR */}
-              <div>
-                <label className="block text-slate-300 font-bold mb-1">
-                  Aktivní model OCR
-                </label>
-                <div className="flex items-center justify-between bg-slate-800 border border-slate-700 rounded-xl p-2.5">
-                  <span className="font-mono text-blue-400 font-bold">{activeModelName}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsSettingsModalOpen(false);
-                      openModelSelector();
-                    }}
-                    className="px-2.5 py-1 bg-slate-700 hover:bg-slate-650 text-white rounded-lg text-[11px] font-semibold cursor-pointer"
-                  >
-                    Změnit model
-                  </button>
+              {/* RESET APLIKACE (vymaže localStorage a znovu inicializuje databázi) */}
+              <div className="bg-rose-950/20 border border-rose-500/30 rounded-2xl p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="block text-slate-200 font-bold text-xs">Reset aplikace</span>
+                  <span className="block text-[11px] text-slate-400 leading-snug">
+                    Vymaže localStorage a znovu inicializuje databázi ({APP_VERSION}).
+                  </span>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setIsResetAppModalOpen(true)}
+                  className="min-h-[44px] px-3 py-2 bg-rose-950/60 hover:bg-rose-900/80 border border-rose-500/40 text-rose-200 rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 tap-active cursor-pointer whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                  <span>Resetovat</span>
+                </button>
               </div>
 
               {/* POKROČILÁ NÁPOVĚDA K DOMÉNÁM */}
@@ -6333,6 +6302,62 @@ export default function App() {
                 {deleteGuestsModalState.hasExported
                   ? `Smazat (${deleteGuestsModalState.guestCount})`
                   : `Přesto smazat (${deleteGuestsModalState.guestCount})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 14: FACTORY RESET APPLICATION CONFIRMATION */}
+      {isResetAppModalOpen && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3 gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl border bg-rose-500/15 border-rose-500/40 text-rose-400 shrink-0">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Resetovat aplikaci</h3>
+                  <p className="text-xs text-slate-400">
+                    Obnovení výchozího stavu pro verzi {APP_VERSION}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsResetAppModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 tap-active cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-rose-950/45 border border-rose-500/40 text-rose-200 text-xs space-y-1.5 leading-relaxed">
+              <p className="font-bold text-rose-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>Nevratné vymazání všech lokálních dat</span>
+              </p>
+              <p>
+                Dojde k úplnému vymazání <strong>localStorage</strong> (všechna ubytování, hosté, historie exportů, uložené odkazy na Google Sheet, Client/Project ID, názvy účtů i volba modelu) a k inicializaci čisté databáze aktuálního modelu verze{' '}
+                <strong className="text-white">{APP_VERSION}</strong>.
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setIsResetAppModalOpen(false)}
+                className="flex-1 min-h-[44px] py-2.5 px-3 bg-slate-800 hover:bg-slate-750 text-white rounded-xl text-xs font-semibold tap-active cursor-pointer"
+              >
+                Zrušit
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmFactoryReset}
+                className="flex-1 min-h-[44px] py-2.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold tap-active cursor-pointer whitespace-nowrap"
+              >
+                Vymazat a resetovat
               </button>
             </div>
           </div>

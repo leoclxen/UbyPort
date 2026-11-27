@@ -3,6 +3,18 @@
 Všechny významné změny projektu **UbyExport** jsou zaznamenávány v tomto souboru.
 Číslo verze se řídí schématem `2.X.Y` (hlavní větev `2`, funkční novinky `X`, opravy `Y`) a čte se z jediného místa v `package.json`.
 
+## [2.10.0] - 2026-11-27
+
+### Přidáno
+- Možnost **Reset aplikace** ve spodní části nastavení s potvrzovacím dialogem, která kompletně vymaže `localStorage`, session i paměť a znovu inicializuje prázdnou databázi s aktuálním datovým modelem verze `2.10.0`.
+
+### Změněno
+- Přesun bloku **Aktivní model OCR** přímo pod sekci **Google / Gemini API klíč** v okně nastavení.
+- Dynamický výpočet sloupce `Celkem_noci` v přehledovém listu `Prehled_hlaseni` (Excel/Google Sheets) z dat příjezdu a odjezdu.
+
+### Odstraněno
+- Zjednodušení datového modelu bez zpětné kompatibility: odebráno nepoužívané pole `variableSymbol` u ubytovacího zařízení a položky `fullName`, `unit`, `airbnbCode`, `idDocumentType`, `documentIssuerCountry` a `nights` u hostů napříč formuláři, tabulkami, OCR i importy/exporty.
+
 ## [2.9.0] - 2026-11-26
 
 ### Přidáno

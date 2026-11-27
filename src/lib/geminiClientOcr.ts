@@ -27,18 +27,15 @@ Struktura formuláře:
 1. HLAVIČKA POBYTU A ZAŘÍZENÍ:
    - Check-in: převeď na ISO datum YYYY-MM-DD (např. 'OCT 1, 2026' -> '2026-10-01').
    - Check-out: převeď na ISO datum YYYY-MM-DD (např. 'OCT 8, 2026' -> '2026-10-08').
-   - Počet nocí (nights): celé číslo z pole 'nights' (např. '7 nights' -> 7).
-   - Označení jednotky / pokoje (detectedUnit): např. 'Unit E302' nebo '102'.
    - Název rezidence / ubytování (detectedPropertyName): např. 'Karolina Plazza - Karlín'.
    - Adresa ubytování (detectedAddress): např. 'Sokolovská 694/102, 186 00 Praha 8' nebo 'Květinková 2570/17, 130 00 Praha 3'.
    - IDUB ubytovacího zařízení (detectedIDUB): pokud je uvedeno (např. CZ1234567890).
    - Zkratka zařízení (detectedFacilityCode): max 5 znaků (např. HOTEL, APART).
    - Ubytovatel / Hostitel (detectedHostName): např. 'Bc. Michaela Heidenreichová'.
-   - IČO / Variabilní symbol (detectedVS): např. '17974305'.
 
 2. TABULKA UBYTOVANÝCH OSOB:
    - Zpracuj pouze fyzicky vyplněné řádky osob! Prázdné řádky ignoruj.
-   - Všechny osoby sdílejí Check-in, Check-out a počet nocí z hlavičky formuláře.
+   - Všechny osoby sdílejí Check-in a Check-out z hlavičky formuláře.
    - Pro každou zapsanou osobu extrahuj:
      * lastName: Příjmení hosta ze sloupce 'příjmení / Last name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. NOVÁK nebo MÜLLER).
      * firstName: Jméno hosta ze sloupce 'jméno / First name'. VELKÝMI PÍSMENY (se zachováním případné evropské/české diakritiky, bez titulů, např. JAN nebo TOMÁŠ).
@@ -52,7 +49,6 @@ Struktura formuláře:
        Pokud je 'SK' nebo 'Slovensko', 'SVK'.
      * passportNumber: Číslo cestovního pasu nebo OP ze sloupce 'č. cestovního dokladu / Passport No'.
        KRITICKÉ: Pokud je ve sloupci cokoliv zapsáno (např. 'A5046 5791', '5791', 'A50465791'), VŽDY tuto hodnotu zapiš bez mezer do 'passportNumber'! Nikdy nenechávej 'passportNumber' prázdné, pokud ve sloupci číslo je.
-     * documentType: 'OP' pro občanský průkaz (ID card), 'PAS' pro cestovní pas. Pokud není zřejmé, použij 'PAS'.
      * homeAddress: Celá adresa ze sloupce 'trvalé bydliště v zahraničí / Home Address' (např. '6917 S Queen St, Littleton Co').
      * city: Město trvalého bydliště z adresy (např. 'Littleton').
      * street: Ulice a číslo z adresy bydliště (např. '6917 S Queen St').
@@ -73,11 +69,8 @@ Vrať čistý JSON s touto strukturou:
   "detectedFacilityCode": "string",
   "detectedDistrictKey": "string",
   "detectedHostName": "string",
-  "detectedVS": "string",
-  "detectedUnit": "string",
   "dateArrival": "YYYY-MM-DD",
   "dateDeparture": "YYYY-MM-DD",
-  "nights": 7,
   "guests": [
     {
       "lastName": "KINKAID",
@@ -86,8 +79,6 @@ Vrať čistý JSON s touto strukturou:
       "nationality": "USA",
       "residenceCountry": "USA",
       "passportNumber": "A50465791",
-      "documentType": "PAS",
-      "documentIssuerCountry": "USA",
       "homeAddress": "6917 S Queen St, Littleton Co",
       "city": "Littleton",
       "street": "6917 S Queen St",
@@ -258,9 +249,8 @@ export async function runClientGeminiOcr(
         nat = 'USA';
       }
 
-      // 2. Stát trvalého bydliště a vydání dokladu: defaultně stát občanství (žádné 'DEU'!)
+      // 2. Stát trvalého bydliště: defaultně stát občanství
       const resC = normalizeCountryCode(g.residenceCountry) || nat;
-      const issC = normalizeCountryCode(g.documentIssuerCountry) || nat;
 
       // 3. Adresa
       let city = g.city || '';
@@ -280,13 +270,11 @@ export async function runClientGeminiOcr(
         firstName: cleanCp1250Name(g.firstName),
         nationality: nat,
         residenceCountry: resC,
-        documentIssuerCountry: issC,
         passportNumber: passNum,
         idDocumentNumber: passNum,
         city: cleanCp1250Bydliste(city),
         street: cleanCp1250Bydliste(street),
         purposeOfStay: normalizePurposeCode(g.purposeOfStay),
-        documentType: /ID|OP|CARD/i.test(g.documentType || '') ? 'OP' : 'PAS',
         nameCheck: g.nameCheck && typeof g.nameCheck === 'object'
           ? {
               firstNameValid: g.nameCheck.firstNameValid !== false,
